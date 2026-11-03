@@ -75,6 +75,27 @@ keep: yes
   assert.ok(removed.length >= 3);
 });
 
+test('text export strips inline JSON, arrays, URL queries and shell secrets', () => {
+  const removed = [];
+  const result = sanitizeTextForExport(`{"apiKey":"leaked-inline"}
+[{"token":"leaked-array"}]
+curl "https://api.example.com?token=leaked-url&keep=yes"
+export OPENAI_API_KEY=leaked-shell
+Authorization: Bearer leaked-bearer
+规范正文保持。`, 'writing-spec.md', removed);
+  assert.doesNotMatch(result, /leaked-/);
+  assert.match(result, /规范正文保持/);
+  assert.match(result, /keep=yes/);
+  assert.ok(removed.length >= 5);
+});
+
+test('text export fails closed for recognizable unkeyed secret material', () => {
+  assert.throws(
+    () => sanitizeTextForExport('token material\n-----BEGIN PRIVATE KEY-----\nleaked\n', 'writing-spec.md', []),
+    /无法安全剥离/,
+  );
+});
+
 test('bundle filename is stable and dated', () => {
   assert.equal(bundleFileName(new Date(2026, 10, 3, 9, 7)), 'wechat-studio-20261103-0907.aws');
 });

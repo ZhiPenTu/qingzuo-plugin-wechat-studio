@@ -22,6 +22,27 @@ assert(manifest.api === '^1.9.0', '插件 API 必须固定为 ^1.9.0。');
 assert(typeof manifest.ui === 'string' && !path.isAbsolute(manifest.ui) && !manifest.ui.includes('..'), '插件界面路径无效。');
 assert(!manifest.backend, '纯前端插件不能声明本机后端。');
 
+const iconPrefix = 'data:image/png;base64,';
+assert(typeof manifest.icon === 'string' && manifest.icon.startsWith(iconPrefix), '插件图标必须为 PNG data URL。');
+const iconBytes = Buffer.from(manifest.icon.slice(iconPrefix.length), 'base64');
+const iconAsset = await readFile(path.join(root, 'assets', 'icon.png'));
+assert(iconBytes.equals(iconAsset), '插件图标必须与 assets/icon.png 完全一致。');
+assert(iconBytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])), '插件图标不是有效 PNG。');
+assert(iconBytes.readUInt32BE(16) === 512 && iconBytes.readUInt32BE(20) === 512, '插件图标必须为 512x512。');
+let iconOffset = 8;
+let iconEnded = false;
+while (iconOffset + 12 <= iconBytes.length) {
+  const length = iconBytes.readUInt32BE(iconOffset);
+  const type = iconBytes.subarray(iconOffset + 4, iconOffset + 8).toString('ascii');
+  iconOffset += 12 + length;
+  if (iconOffset > iconBytes.length) throw new Error('插件图标 PNG 数据不完整。');
+  if (type === 'IEND') {
+    iconEnded = true;
+    break;
+  }
+}
+assert(iconEnded && iconOffset === iconBytes.length, '插件图标 PNG 缺少完整 IEND。');
+
 const permissions = manifest.permissions || {};
 const allowed = new Set(['files', 'storage', 'ai', 'workspace', 'mcp', 'wechat']);
 for (const key of Object.keys(permissions)) assert(allowed.has(key), '存在未支持的权限：' + key);

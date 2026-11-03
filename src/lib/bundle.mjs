@@ -103,7 +103,51 @@ function sanitizeTextForExport(text, label, removed) {
     /(```json[^\n]*\r?\n)([\s\S]*?)(```)/gi,
     (_match, start, body, end) => start + scrubStructured(body, 'json') + end,
   );
-  return scrubSensitiveLines(result, label, removed);
+  result = scrubSensitiveLines(result, label, removed);
+  result = scrubInlineSecrets(result, label, removed);
+  assertNoSecretMaterial(result, label);
+  return result;
+}
+
+function scrubInlineSecrets(source, label, removed) {
+  const keyValue = /(["']?)([A-Za-z0-9_.-]+)\1(\s*[:=]\s*)(?!\/\/)((?:"(?:\\.|[^"])*"|'(?:\\.|[^'])*'|[^\s,}\]&]+))/g;
+  let result = String(source || '');
+  result = result.replace(
+    /(authorization\s*:\s*)(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+/gi,
+    (_match, prefix) => {
+      removed.push(label + '.authorization');
+      return prefix + '[已移除]';
+    },
+  );
+  result = result.replace(
+    /([?&])([A-Za-z0-9_.-]+)(=)([^&\s"'<>]+)/g,
+    (match, prefix, key, separator) => {
+      if (!isSensitiveKey(key)) return match;
+      removed.push(label + '.' + key);
+      return prefix + key + separator + '[已移除]';
+    },
+  );
+  result = result.replace(keyValue, (match, quote, key, separator, value) => {
+    if (!isSensitiveKey(key)) return match;
+    const bare = value.replace(/^["']|["']$/g, '');
+    if (bare === '|' || bare === '>' || bare.startsWith('[已移除]')) return match;
+    removed.push(label + '.' + key);
+    return quote + key + quote + separator + '[已移除]';
+  });
+  return result;
+}
+
+function assertNoSecretMaterial(source, label) {
+  const forbidden = [
+    /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/,
+    /\bgh[pousr]_[A-Za-z0-9]{30,}\b/,
+    /\bgithub_pat_[A-Za-z0-9_]{30,}\b/,
+    /\bsk-[A-Za-z0-9_-]{20,}\b/,
+    /\bAKIA[0-9A-Z]{16}\b/,
+  ];
+  if (forbidden.some(pattern => pattern.test(source))) {
+    throw new Error(label + ' 仍包含无法安全剥离的密钥，已停止导出。');
+  }
 }
 
 function scrubSensitiveLines(source, label, removed) {
