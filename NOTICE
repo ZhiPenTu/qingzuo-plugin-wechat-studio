@@ -1,0 +1,16 @@
+公众号 AI 工作台
+Copyright 2026 Qingzuo
+
+本项目的公众号写作、审稿、排版、配图、发布、素材库和贴图流程，
+基于 aiworkskills/wechat-article-skills 的行为基准与预设重新实现。
+
+上游来源：
+https://github.com/aiworkskills/wechat-article-skills
+
+上游许可证：Apache License 2.0
+
+修改说明：
+- 将 Python 脚本与命令行流程改写为轻作插件中的浏览器端 TypeScript/JavaScript。
+- 使用轻作宿主托管的工作区、共享 AI、远程 MCP 与公众号接口，不携带模型或微信密钥。
+- 保留主题、配色、组件、图片形态和写作配额的行为语义，重做界面与错误恢复。
+- 未复制官网品牌标识、账号数据、云端服务或专有营销素材。
