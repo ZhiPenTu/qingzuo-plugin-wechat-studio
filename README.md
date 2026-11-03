@@ -24,13 +24,16 @@
 ```sh
 npm ci
 npm test
-npx tsc --noEmit
+npm run typecheck
 npm run build
 npm run validate
 npm run pack
+npm run verify:package
 ```
 
-`npm run pack` 在 `release/` 生成 macOS arm64 与 Windows x64 同名内容的 `.ecplugin`。插件为纯前端包，生产环境不执行包内脚本，也不需要 `node_modules`。
+`npm run pack` 在当前平台生成对应平台的 `.ecplugin` 和 `catalog-<平台>.json`。发布流水线分别在 macOS arm64 与 Windows x64 构建，校验制品的 URL、大小与 SHA-256，再用固定底座 `v0.7.0` 完成安装验收。插件为纯前端包，生产环境不执行包内脚本，也不需要 `node_modules`。
+
+推送到 `ZhiPenTu/qingzuo-plugin-wechat-studio` 后，创建与 `package.json` 版本一致的 `vX.Y.Z` 标签即可构建并发布 GitHub Release。正式发布日志保存在 `docs/releases/`。
 
 ## 许可证
 

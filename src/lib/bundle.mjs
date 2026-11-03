@@ -37,8 +37,6 @@ const SENSITIVE_KEYS = new Set([
   'password',
   'passwd',
 ]);
-const SECRET_KEY_PATTERN = '(?:api[_-]?key|app[_-]?secret|appsecret|access[_-]?token|refresh[_-]?token|client[_-]?secret|authorization|password|bearer[_-]?token|base[_-]?url|endpoint)';
-
 function normalizedKey(value) {
   return String(value || '').replace(/[^a-z0-9]/gi, '').toLowerCase();
 }
@@ -80,20 +78,107 @@ function stripSecrets(value, removed = []) {
 function sanitizeTextForExport(text, label, removed) {
   const source = String(text || '');
   if (!source) return '';
-  const linePattern = new RegExp('^(\\s*' + SECRET_KEY_PATTERN + '\\s*[:=]\\s*).+$', 'gim');
-  const jsonPattern = new RegExp('("(?:' + SECRET_KEY_PATTERN + ')"\\s*:\\s*)"(?:[^"\\\\]|\\\\.)*"', 'gi');
-  let changed = false;
-  const result = source
-    .replace(linePattern, (_match, prefix) => {
-      changed = true;
-      return prefix + '[已移除]';
-    })
-    .replace(jsonPattern, (_match, prefix) => {
-      changed = true;
-      return prefix + '"[已移除]"';
-    });
-  if (changed) removed.push(label);
+  const scrubStructured = (value, format) => {
+    try {
+      const parsed = format === 'json' ? JSON.parse(value) : YAML.parse(value);
+      const stripped = stripSecrets(parsed);
+      for (const key of stripped.removed) removed.push(label + '.' + key);
+      return format === 'json'
+        ? JSON.stringify(stripped.value, null, 2) + '\n'
+        : YAML.stringify(stripped.value, { lineWidth: 0 });
+    } catch {
+      return scrubSensitiveLines(value, label, removed);
+    }
+  };
+
+  let result = source.replace(
+    /^---\r?\n([\s\S]*?)\r?\n---/,
+    (_match, body) => '---\n' + scrubStructured(body, 'yaml') + '---',
+  );
+  result = result.replace(
+    /(```ya?ml[^\n]*\r?\n)([\s\S]*?)(```)/gi,
+    (_match, start, body, end) => start + scrubStructured(body, 'yaml') + end,
+  );
+  result = result.replace(
+    /(```json[^\n]*\r?\n)([\s\S]*?)(```)/gi,
+    (_match, start, body, end) => start + scrubStructured(body, 'json') + end,
+  );
+  result = scrubSensitiveLines(result, label, removed);
+  result = scrubInlineSecrets(result, label, removed);
+  assertNoSecretMaterial(result, label);
   return result;
+}
+
+function scrubInlineSecrets(source, label, removed) {
+  const keyValue = /(["']?)([A-Za-z0-9_.-]+)\1(\s*[:=]\s*)(?!\/\/)((?:"(?:\\.|[^"])*"|'(?:\\.|[^'])*'|[^\s,}\]&]+))/g;
+  let result = String(source || '');
+  result = result.replace(
+    /(authorization\s*:\s*)(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+/gi,
+    (_match, prefix) => {
+      removed.push(label + '.authorization');
+      return prefix + '[已移除]';
+    },
+  );
+  result = result.replace(
+    /([?&])([A-Za-z0-9_.-]+)(=)([^&\s"'<>]+)/g,
+    (match, prefix, key, separator) => {
+      if (!isSensitiveKey(key)) return match;
+      removed.push(label + '.' + key);
+      return prefix + key + separator + '[已移除]';
+    },
+  );
+  result = result.replace(keyValue, (match, quote, key, separator, value) => {
+    if (!isSensitiveKey(key)) return match;
+    const bare = value.replace(/^["']|["']$/g, '');
+    if (bare === '|' || bare === '>' || bare.startsWith('[已移除]')) return match;
+    removed.push(label + '.' + key);
+    return quote + key + quote + separator + '[已移除]';
+  });
+  return result;
+}
+
+function assertNoSecretMaterial(source, label) {
+  const forbidden = [
+    /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/,
+    /\bgh[pousr]_[A-Za-z0-9]{30,}\b/,
+    /\bgithub_pat_[A-Za-z0-9_]{30,}\b/,
+    /\bsk-[A-Za-z0-9_-]{20,}\b/,
+    /\bAKIA[0-9A-Z]{16}\b/,
+  ];
+  if (forbidden.some(pattern => pattern.test(source))) {
+    throw new Error(label + ' 仍包含无法安全剥离的密钥，已停止导出。');
+  }
+}
+
+function scrubSensitiveLines(source, label, removed) {
+  const lines = String(source || '').split(/\r?\n/);
+  const output = [];
+  let blockIndent = null;
+  for (const line of lines) {
+    if (blockIndent !== null) {
+      if (!line.trim()) {
+        output.push('');
+        continue;
+      }
+      const indent = line.match(/^\s*/)?.[0].length || 0;
+      if (indent > blockIndent) {
+        output.push('');
+        continue;
+      }
+      blockIndent = null;
+    }
+    const match = line.match(/^(\s*(?:-\s+)?)(["']?)([A-Za-z0-9_.-]+)\2\s*([:=])\s*(.*)$/);
+    if (match && isSensitiveKey(match[3])) {
+      const indent = line.match(/^\s*/)?.[0] || '';
+      output.push(indent + (match[1].includes('-') ? '- ' : '') + match[3] + match[4] + ' [已移除]');
+      removed.push(label + '.' + match[3]);
+      const value = match[5].trim();
+      if (!value || value.startsWith('|') || value.startsWith('>')) blockIndent = indent.length;
+      continue;
+    }
+    output.push(line);
+  }
+  return output.join('\n');
 }
 
 export function sanitizeConfigForExport(text) {
@@ -102,6 +187,21 @@ export function sanitizeConfigForExport(text) {
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('config.yaml 根节点必须是对象。');
   const { value, removed } = stripSecrets(parsed);
   return { text: YAML.stringify(value, { lineWidth: 0 }), removed };
+}
+
+export function sanitizeYamlForExport(text, label = 'yaml') {
+  if (!String(text || '').trim()) return { text: '', removed: [] };
+  let parsed;
+  try {
+    parsed = YAML.parse(String(text));
+  } catch {
+    throw new Error(label + ' 无法解析，已停止导出。');
+  }
+  const { value, removed } = stripSecrets(parsed);
+  return {
+    text: value === null ? '' : YAML.stringify(value, { lineWidth: 0 }),
+    removed: removed.map(key => label + '.' + key),
+  };
 }
 
 export function bundleFileName(date = new Date()) {
@@ -125,7 +225,13 @@ export async function collectBundle(api) {
       const relative = entry.path.slice(('.aws-article/presets/' + directory + '/').length);
       const text = await api.workspace.readText({ path: entry.path, maxBytes: 2 * 1024 * 1024 });
       const label = 'presets/' + directory + '/' + relative;
-      files[label] = strToU8(sanitizeTextForExport(text, label, removed));
+      if (/\.ya?ml$/i.test(relative)) {
+        const sanitizedPreset = sanitizeYamlForExport(text, label);
+        removed.push(...sanitizedPreset.removed);
+        files[label] = strToU8(sanitizedPreset.text);
+      } else {
+        files[label] = strToU8(sanitizeTextForExport(text, label, removed));
+      }
     }
   }
   if (!Object.keys(files).length) throw new Error('当前工作区没有可导出的配置、写作规范或预设。');

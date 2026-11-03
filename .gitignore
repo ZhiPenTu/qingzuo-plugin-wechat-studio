@@ -1,6 +1,7 @@
 node_modules/
-ui/
+/ui/
 release/
+output/
 .vite-cache/
 .DS_Store
 *.log

@@ -4,13 +4,15 @@ import path from 'node:path';
 
 const root = path.resolve(import.meta.dirname, '..');
 const pkg = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
+const lock = JSON.parse(await readFile(path.join(root, 'package-lock.json'), 'utf8'));
 const manifest = pkg.commerce;
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
 
-assert(pkg.version === '0.1.0', '版本号必须与首个发布版本 0.1.0 一致。');
+assert(/^\d+\.\d+\.\d+$/.test(pkg.version), '插件版本必须为稳定的三段式版本号。');
+assert(lock.version === pkg.version && lock.packages?.['']?.version === pkg.version, 'package-lock.json 版本与插件版本不一致。');
 assert(manifest?.manifestVersion === 1, 'manifestVersion 必须为 1。');
 assert(manifest.id === 'official.wechat-studio', '插件标识必须为 official.wechat-studio。');
 assert(/^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)+$/.test(manifest.id), '插件标识格式无效。');
@@ -19,6 +21,27 @@ assert(manifest.category === '内容创作', '插件分类无效。');
 assert(manifest.api === '^1.9.0', '插件 API 必须固定为 ^1.9.0。');
 assert(typeof manifest.ui === 'string' && !path.isAbsolute(manifest.ui) && !manifest.ui.includes('..'), '插件界面路径无效。');
 assert(!manifest.backend, '纯前端插件不能声明本机后端。');
+
+const iconPrefix = 'data:image/png;base64,';
+assert(typeof manifest.icon === 'string' && manifest.icon.startsWith(iconPrefix), '插件图标必须为 PNG data URL。');
+const iconBytes = Buffer.from(manifest.icon.slice(iconPrefix.length), 'base64');
+const iconAsset = await readFile(path.join(root, 'assets', 'icon.png'));
+assert(iconBytes.equals(iconAsset), '插件图标必须与 assets/icon.png 完全一致。');
+assert(iconBytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])), '插件图标不是有效 PNG。');
+assert(iconBytes.readUInt32BE(16) === 512 && iconBytes.readUInt32BE(20) === 512, '插件图标必须为 512x512。');
+let iconOffset = 8;
+let iconEnded = false;
+while (iconOffset + 12 <= iconBytes.length) {
+  const length = iconBytes.readUInt32BE(iconOffset);
+  const type = iconBytes.subarray(iconOffset + 4, iconOffset + 8).toString('ascii');
+  iconOffset += 12 + length;
+  if (iconOffset > iconBytes.length) throw new Error('插件图标 PNG 数据不完整。');
+  if (type === 'IEND') {
+    iconEnded = true;
+    break;
+  }
+}
+assert(iconEnded && iconOffset === iconBytes.length, '插件图标 PNG 缺少完整 IEND。');
 
 const permissions = manifest.permissions || {};
 const allowed = new Set(['files', 'storage', 'ai', 'workspace', 'mcp', 'wechat']);
