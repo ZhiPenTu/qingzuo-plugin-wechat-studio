@@ -1,0 +1,133 @@
+name: Validate and release WeChat Studio
+on:
+  pull_request:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      host_run_id:
+        description: 'Successful Qingzuo v0.7.0 Release commerce desktop run ID'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm test
+      - run: test -n "$(git ls-files src/ui)"
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm run validate
+
+  package:
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            platform: darwin-arm64
+          - os: windows-latest
+            platform: win32-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run build
+      - run: npm run validate
+      - run: npm run pack -- ${{ matrix.platform }}
+      - run: npm run verify:package -- ${{ matrix.platform }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Plugin-${{ runner.os }}
+          path: |
+            release/*.ecplugin
+            release/catalog-*.json
+
+  host:
+    if: github.event_name != 'pull_request'
+    needs: package
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            artifact: macOS
+          - os: windows-latest
+            artifact: Windows
+    runs-on: ${{ matrix.os }}
+    env:
+      QINGZUO_HOST_RUN_ID: ${{ inputs.host_run_id || vars.QINGZUO_HOST_RUN_ID }}
+      QINGZUO_HOST_VERSION: v0.7.0
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - uses: actions/download-artifact@v4
+        with:
+          name: Plugin-${{ matrix.artifact }}
+          path: release
+      - uses: actions/download-artifact@v4
+        with:
+          repository: ZhiPenTu/qingzuo-desktop
+          run-id: ${{ env.QINGZUO_HOST_RUN_ID }}
+          github-token: ${{ github.token }}
+          name: Commerce-${{ matrix.artifact }}
+          path: host
+      - name: Prepare fixed host outside the plugin source directory
+        run: |
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            archive=$(find host/desktop -maxdepth 1 -name 'CommerceTools-*-mac-arm64.zip' -print -quit)
+            test -n "$archive"
+            ditto -x -k "$archive" "$RUNNER_TEMP/qingzuo-runtime"
+            echo "QINGZUO_HOST_EXECUTABLE=$RUNNER_TEMP/qingzuo-runtime/Qingzuo.app/Contents/MacOS/Qingzuo" >> "$GITHUB_ENV"
+          else
+            node --input-type=module -e "import {cp} from 'node:fs/promises';import path from 'node:path';await cp('host/desktop/win-unpacked',path.join(process.env.RUNNER_TEMP,'qingzuo-runtime'),{recursive:true});"
+            echo "QINGZUO_HOST_EXECUTABLE=$RUNNER_TEMP/qingzuo-runtime/Qingzuo.exe" >> "$GITHUB_ENV"
+          fi
+      - run: npm run test:host
+
+  publish:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [package, host]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: Plugin-*
+          path: release
+          merge-multiple: true
+      - name: Publish validated artifacts
+        run: |
+          node --input-type=module -e "import pkg from './package.json' with {type:'json'};if(process.env.GITHUB_REF_NAME!=='v'+pkg.version)throw new Error('Tag mismatch');"
+          test -f "docs/releases/$GITHUB_REF_NAME.md"
+          gh release create "$GITHUB_REF_NAME" release/*.ecplugin release/catalog-*.json --verify-tag --title "公众号 AI 工作台 $GITHUB_REF_NAME" --notes-file "docs/releases/$GITHUB_REF_NAME.md"

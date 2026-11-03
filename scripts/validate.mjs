@@ -4,13 +4,15 @@ import path from 'node:path';
 
 const root = path.resolve(import.meta.dirname, '..');
 const pkg = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
+const lock = JSON.parse(await readFile(path.join(root, 'package-lock.json'), 'utf8'));
 const manifest = pkg.commerce;
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
 
-assert(pkg.version === '0.1.0', '版本号必须与首个发布版本 0.1.0 一致。');
+assert(/^\d+\.\d+\.\d+$/.test(pkg.version), '插件版本必须为稳定的三段式版本号。');
+assert(lock.version === pkg.version && lock.packages?.['']?.version === pkg.version, 'package-lock.json 版本与插件版本不一致。');
 assert(manifest?.manifestVersion === 1, 'manifestVersion 必须为 1。');
 assert(manifest.id === 'official.wechat-studio', '插件标识必须为 official.wechat-studio。');
 assert(/^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)+$/.test(manifest.id), '插件标识格式无效。');
