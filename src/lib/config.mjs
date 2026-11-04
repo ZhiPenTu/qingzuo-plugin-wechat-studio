@@ -1,4 +1,5 @@
 import YAML from 'yaml';
+import { DEFAULT_MCP_IMAGE_ARGS, renderMcpArguments } from './mcp-images.mjs';
 
 export const PRESET_FIELDS = [
   'structure',
@@ -47,6 +48,10 @@ export const DEFAULT_CONFIG = {
   custom_article_image_style: [],
   custom_sticker_style: [],
   image_source: 'generated',
+  image_generator: 'model',
+  mcp_image_server: '',
+  mcp_image_tool: '',
+  mcp_image_args: DEFAULT_MCP_IMAGE_ARGS,
   cover_aspect: '2.35:1',
   cover_style: '简约',
   image_density: '每节一图',
@@ -205,6 +210,16 @@ export function validateConfig(config) {
   const pureSummaryRange = typeof value.summary_length === 'string' && /^\s*\d+\s*-\s*\d+\s*$/.test(value.summary_length);
   if (!pureSummaryRange && !splitSummarySetting(value.summary_length).range) errors.push('摘要字数范围需包含类似「80-128」的字数区间。');
   if (!['generated', 'user'].includes(value.image_source)) errors.push('图片来源应为 generated 或 user。');
+  if (!['model', 'mcp'].includes(value.image_generator)) errors.push('生图方式应为 model 或 mcp。');
+  if (value.image_generator === 'mcp' && value.image_source !== 'user') {
+    if (!String(value.mcp_image_server || '').trim()) errors.push('使用 MCP 生图时需要选择 MCP 服务。');
+    if (!String(value.mcp_image_tool || '').trim()) errors.push('使用 MCP 生图时需要选择生图工具。');
+    try {
+      renderMcpArguments(value.mcp_image_args, { prompt: '测试', size: '1:1', count: 1 });
+    } catch (error) {
+      errors.push(error instanceof Error ? error.message : 'MCP 工具参数模板无效。');
+    }
+  }
   if (!['2.35:1', '16:9', '1:1', '1.91:1'].includes(value.cover_aspect)) errors.push('封面比例无效。');
   if (!['有图注', '无图注', '关键图有'].includes(value.caption_style)) errors.push('图注规则无效。');
   if (!['draft', 'published', 'none'].includes(value.publish_method)) errors.push('发布方式无效。');
@@ -226,6 +241,10 @@ export function normalizeConfigForSave(config = {}) {
   value.need_open_comment = value.need_open_comment ? 1 : 0;
   value.only_fans_can_comment = value.only_fans_can_comment ? 1 : 0;
   value.publish_completed = Boolean(value.publish_completed);
+  value.image_generator = value.image_generator === 'mcp' ? 'mcp' : 'model';
+  value.mcp_image_server = String(value.mcp_image_server || '').trim();
+  value.mcp_image_tool = String(value.mcp_image_tool || '').trim();
+  value.mcp_image_args = String(value.mcp_image_args || '').trim() || DEFAULT_MCP_IMAGE_ARGS;
   value.review_required = [...new Set((Array.isArray(value.review_required) ? value.review_required : []).map(String).filter(Boolean))];
   value.forbidden_words = [...new Set((Array.isArray(value.forbidden_words) ? value.forbidden_words : []).map(String).filter(Boolean))];
   value.forbidden_title_phrases = [...new Set((Array.isArray(value.forbidden_title_phrases) ? value.forbidden_title_phrases : []).map(String).filter(Boolean))];

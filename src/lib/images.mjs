@@ -235,7 +235,7 @@ export function rewriteImageMarkersWithMapping(markdown, plan, mapping = {}) {
 export function mapGeneratedFiles(plan, entries) {
   const generated = entries
     .map(entry => ({ ...entry, generatedName: String(entry.name || entry.path || '').split('/').pop() || '' }))
-    .filter(entry => entry.kind === 'file' && /^生成图-\d+-ai-[a-f0-9]+-\d+\.(?:png|jpg|webp)$/i.test(entry.generatedName))
+    .filter(entry => entry.kind === 'file' && /^生成图-\d+-ai-[a-f0-9]+-\d+\.(?:png|jpe?g|webp|gif)$/i.test(entry.generatedName))
     .map(entry => ({ ...entry, batchIndex: Number(entry.generatedName.match(/生成图-(\d+)/)?.[1] || 0) }))
     .filter(entry => entry.batchIndex > 0 && entry.batchIndex <= plan.prompts.length)
     .sort((left, right) => left.batchIndex - right.batchIndex);

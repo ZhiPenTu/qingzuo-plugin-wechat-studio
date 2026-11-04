@@ -324,6 +324,7 @@ export function App() {
         ) : (
           <StickerPage
             config={config}
+            servers={servers}
             imageModels={imageModels}
             preferences={preferences}
             notify={notify}

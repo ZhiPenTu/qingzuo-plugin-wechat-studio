@@ -18,6 +18,7 @@ import {
 import { compressBodyImageBytes, cropImageBytes, base64Bytes, bytesBase64 } from '../lib/crop.mjs';
 import { imageModelLabel, imageModelSource } from '../lib/image-models.mjs';
 import { projectImagePreviews } from '../lib/image-previews.mjs';
+import { generateImagesThroughMcp, mcpBatchToken, mcpCoverSize } from '../lib/mcp-images.mjs';
 import {
   appendLog,
   loadProject,
@@ -218,7 +219,7 @@ function ProjectWorkspace({
           ) : active === 'format' ? (
             <FormatStage project={project} config={config} themeSummaries={themeSummaries} notify={notify} onSaved={() => void advance('format', { next: false })} onNext={() => void advance('format')} />
           ) : active === 'images' ? (
-            <ImagesStage project={project} config={config} imageModels={imageModels} modelId={preferences.imageModelId} notify={notify} onSaved={() => void advance('images', { next: false })} onNext={() => void advance('images')} onReload={onReload} />
+            <ImagesStage project={project} config={config} servers={servers} imageModels={imageModels} modelId={preferences.imageModelId} notify={notify} onSaved={() => void advance('images', { next: false })} onNext={() => void advance('images')} onReload={onReload} />
           ) : active === 'final' ? (
             <FinalStage project={project} config={config} accounts={accounts} notify={notify} onSaved={() => void advance('final', { next: false })} onNext={() => void advance('final')} />
           ) : (
@@ -850,9 +851,9 @@ function FormatStage({
 }
 
 function ImagesStage({
-  project, config, imageModels, modelId: preferredModelId, notify, onSaved, onNext, onReload,
+  project, config, servers, imageModels, modelId: preferredModelId, notify, onSaved, onNext, onReload,
 }: {
-  project: ArticleProject; config: Record<string, any>; imageModels: ImageModel[]; modelId: string; notify: Notify;
+  project: ArticleProject; config: Record<string, any>; servers: McpServer[]; imageModels: ImageModel[]; modelId: string; notify: Notify;
   onSaved: () => void; onNext: () => void; onReload: () => Promise<void>;
 }) {
   const baseMarkdown = project.files.format || project.files.writing || '';
@@ -861,12 +862,19 @@ function ImagesStage({
   const [batch, setBatch] = useState<any>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
+  const [mcpWaiting, setMcpWaiting] = useState(false);
   const [coverStyle, setCoverStyle] = useState(String(config.cover_style || ''));
   const [medium, setMedium] = useState(String(config.image_medium || ''));
   const [batchPath, setBatchPath] = useState('');
   const [previews, setPreviews] = useState<PreviewImage[]>([]);
   const [preview, setPreview] = useState<(PreviewImage & { url: string }) | null>(null);
+  const mcpAbort = useRef<AbortController | null>(null);
   const imageSource = String(project.article.image_source || config.image_source || 'generated');
+  const imageGenerator = config.image_generator === 'mcp' ? 'mcp' : 'model';
+  const mcpServer = servers.find(server => server.id === config.mcp_image_server);
+  const mcpReady = Boolean(mcpServer && mcpServer.status === 'ready');
+
+  useEffect(() => () => mcpAbort.current?.abort(), []);
 
   useEffect(() => {
     if (!imageModels.some(model => model.id === modelId)) setModelId(imageModels[0]?.id || '');
@@ -920,8 +928,124 @@ function ImagesStage({
   }
 
   async function generate(action: 'new' | 'retry' = 'new') {
-    if (!plan || !modelId) {
-      notify('请选择图片模型。', 'warning');
+    if (!plan || (imageGenerator !== 'mcp' && !modelId)) {
+      notify(imageGenerator === 'mcp' ? '请先完成 MCP 生图配置。' : '请选择图片模型。', 'warning');
+      return;
+    }
+    if (imageGenerator === 'mcp') {
+      if (!config.mcp_image_server || !config.mcp_image_tool || !mcpReady) {
+        notify('请先在配置中心选择当前可用的 MCP 服务和生图工具。', 'warning');
+        return;
+      }
+      setBusy(true);
+      const runToken = mcpBatchToken();
+      const outputPath = project.directory + '/imgs/batches/mcp-' + runToken;
+      const controller = new AbortController();
+      mcpAbort.current = controller;
+      let producedFiles = 0;
+      setBatchPath(outputPath);
+      setMessage('正在通过 MCP 生成图片…');
+      try {
+        setMcpWaiting(true);
+        const result = await generateImagesThroughMcp({
+          api,
+          serverId: config.mcp_image_server,
+          toolName: config.mcp_image_tool,
+          argsTemplate: config.mcp_image_args,
+          prompts: plan.prompts,
+          directory: outputPath,
+          sizeFor: (index: number) => index === 0 ? mcpCoverSize(plan.cover?.aspect || config.cover_aspect) : '16:9',
+          onProgress: (current: number, total: number) => setMessage('正在通过 MCP 生成第 ' + current + '/' + total + ' 张…'),
+          signal: controller.signal,
+        });
+        producedFiles = result.files.length;
+        setMcpWaiting(false);
+        const issueByIndex = new Map([...result.failures, ...result.unknowns].map(item => [item.index, item]));
+        const errorByIndex = new Map([...issueByIndex].map(([index, issue]) => [index, issue.error]));
+        const unknownIndexes = new Set(result.unknowns.map(item => item.index));
+        if (result.abortedIndex) unknownIndexes.add(result.abortedIndex);
+        const succeeded = new Set(result.files.map(item => item.index));
+        const value = {
+          id: 'mcp-' + runToken,
+          revision: 1,
+          state: result.aborted || result.fatal ? 'interrupted' : 'finished',
+          workspacePath: outputPath,
+          items: plan.prompts.map((prompt: string, index: number) => ({
+            id: 'mcp-' + (index + 1),
+            name: '生成图-' + (index + 1),
+            state: succeeded.has(index + 1)
+              ? 'succeeded'
+              : unknownIndexes.has(index + 1)
+                ? 'unknown'
+                : result.aborted || result.fatal
+                  ? 'canceled'
+                  : 'failed',
+            error: errorByIndex.get(index + 1) || null,
+            taskId: issueByIndex.get(index + 1)?.taskId || (result.abortedIndex === index + 1 ? result.abortedTaskId : '') || null,
+            prompt,
+          })),
+        };
+        setBatch(value);
+        const hasRecovery = producedFiles > 0 || result.unknowns.length > 0 || Boolean(result.abortedTaskId);
+        if (result.fatal) {
+          const note = (producedFiles
+            ? result.fatal + ' 已生成的 ' + producedFiles + ' 张图片保留在 ' + outputPath + '。'
+            : result.fatal)
+            + (hasRecovery && !producedFiles ? ' 结果记录在 ' + outputPath + '/mcp-generation.json。' : '');
+          if (!hasRecovery) await api.workspace.remove({ path: outputPath, recursive: true }).catch(() => {});
+          setMessage(note);
+          notify(note, 'danger');
+          return;
+        }
+        if (result.aborted) {
+          const note = producedFiles
+            ? '已停止等待，已生成 ' + producedFiles + ' 张图片并保留在 ' + outputPath + '；后续任务可能仍在 MCP 服务端进行。'
+            : '已停止等待，当前没有已写入的图片；任务可能仍在 MCP 服务端进行。'
+              + (hasRecovery ? ' 结果记录在 ' + outputPath + '/mcp-generation.json。' : '');
+          if (!hasRecovery) await api.workspace.remove({ path: outputPath, recursive: true }).catch(() => {});
+          setMessage(note);
+          notify(note, 'warning');
+          return;
+        }
+        if (!result.files.length) {
+          if (result.unknowns.length) {
+            const note = 'MCP 没有生成可用图片；结果未知，任务 ID 已写入 ' + outputPath + '/mcp-generation.json。';
+            setMessage(note);
+            notify(note, 'warning');
+            return;
+          }
+          const first = result.failures[0]?.error;
+          throw new Error('MCP 没有生成任何可用图片。' + (first ? '首个错误：' + first : ''));
+        }
+        const applied = await applyBatch(value, outputPath);
+        if (applied.missing || result.failures.length) {
+          const notes = [
+            applied.missing ? '仍有 ' + applied.missing + ' 个图位缺少图片' : '',
+            result.failures.length ? result.failures.length + ' 张生成失败' : '',
+          ].filter(Boolean);
+          setMessage(notes.join('；') + '。');
+          notify(notes.join('；') + '。已保留可用图片。', 'warning');
+        } else {
+          await api.workspace.remove({ path: outputPath, recursive: true }).catch(() => {});
+          notify('图片已通过 MCP 生成并整理完成。请逐张检查中文和信息位内容。', 'success');
+        }
+      } catch (error) {
+        setMcpWaiting(false);
+        const reason = errorText(error);
+        if (producedFiles) {
+          const note = reason + ' 已生成的 ' + producedFiles + ' 张图片保留在 ' + outputPath + '。';
+          setMessage(note);
+          notify(note, 'danger');
+        } else {
+          await api.workspace.remove({ path: outputPath, recursive: true }).catch(() => {});
+          notify(reason, 'danger');
+          setMessage(reason);
+        }
+      } finally {
+        mcpAbort.current = null;
+        setMcpWaiting(false);
+        setBusy(false);
+      }
       return;
     }
     setBusy(true);
@@ -1112,10 +1236,7 @@ function ImagesStage({
     let cover235Path = '';
     let cover11Path = '';
     if (coverEntry) {
-      const coverExtension = coverEntry.path.split('.').pop()?.toLowerCase() || 'png';
-      const coverRaw = project.directory + '/imgs/cover-raw-' + token + '.' + coverExtension;
-      await api.workspace.rename({ from: coverEntry.path, to: coverRaw });
-      const coverFile = await api.workspace.readFile({ path: coverRaw });
+      const coverFile = await api.workspace.readFile({ path: coverEntry.path });
       const coverBytes = base64Bytes(coverFile.data);
       const coverAspect = String(config.cover_aspect || '2.35:1');
       const coverBytesJpeg = await cropImageBytes(coverBytes, coverFile.mime, coverAspect, 0.9);
@@ -1191,11 +1312,17 @@ function ImagesStage({
     <div>
       <StageHeader title="配图" description="12 种封面、8 种正文形态、8 种统一媒介。信息位必须使用文章真实内容，实证图必须由你提供。" />
       <div className="form-grid form-grid-3">
-        <Field label="图片模型">
-          <select value={modelId} onChange={event => setModelId(event.target.value)}>
-            {imageModels.map(model => <option key={model.id} value={model.id}>{imageModelLabel(model)}</option>)}
-          </select>
-        </Field>
+        {imageGenerator === 'mcp' ? (
+          <Field label="MCP 生图">
+            <input readOnly value={(mcpServer?.name || '未选择服务') + ' · ' + (config.mcp_image_tool || '未选择工具')} />
+          </Field>
+        ) : (
+          <Field label="图片模型">
+            <select value={modelId} onChange={event => setModelId(event.target.value)}>
+              {imageModels.map(model => <option key={model.id} value={model.id}>{imageModelLabel(model)}</option>)}
+            </select>
+          </Field>
+        )}
         <Field label="封面形态">
           <select value={plan?.cover?.style || coverStyle} onChange={event => setCoverStyle(event.target.value)}>
             {COVER_STYLES.map(name => <option key={name} value={name}>{name}</option>)}
@@ -1207,7 +1334,9 @@ function ImagesStage({
           </select>
         </Field>
       </div>
-      {!imageModels.length ? <div className="notice warning">没有读取到图片模型。请先在「设置 → AI」配置共享图片 Key，或在兼容服务中提供生图模型。</div> : null}
+      {imageGenerator === 'model' && !imageModels.length ? <div className="notice warning">没有读取到图片模型。请先在「设置 → AI」配置共享图片 Key，或在兼容服务中提供生图模型。</div> : null}
+      {imageGenerator === 'mcp' && !mcpReady ? <div className="notice warning">配置中的 MCP 服务当前不可用，请到配置中心重新选择并确认连接状态。</div> : null}
+      {imageGenerator === 'mcp' && imageSource !== 'user' ? <div className="notice info">本篇通过 MCP 工具生图。首次调用会请求你单独授权该工具；工具可能产生费用，请确认后再继续。</div> : null}
       {plan ? (
         <>
           <div className="image-plan">
@@ -1251,7 +1380,7 @@ function ImagesStage({
               <span>{index + 1}</span>
               <strong>{item.name}</strong>
               <Badge tone={item.state === 'succeeded' ? 'success' : item.state === 'failed' || item.state === 'unknown' ? 'danger' : item.state === 'running' ? 'accent' : 'neutral'}>{batchState(item.state)}</Badge>
-              {item.error ? <small>{item.error}</small> : null}
+              {item.error ? <small>{item.error}{item.taskId ? ' · 任务 ID：' + item.taskId : ''}</small> : null}
             </div>
           ))}
         </div>
@@ -1264,15 +1393,23 @@ function ImagesStage({
           </>
         ) : (
           <>
-            {retryable.length ? <Button type="button" variant="danger" onClick={() => void generate('retry')} busy={busy}>明确重试失败项</Button> : null}
-            <Button type="button" variant="primary" onClick={() => void generate('new')} busy={busy} disabled={!plan || !modelId || batch?.state === 'running' || batch?.state === 'canceling'}>
-              {batch ? '重新生成全部图片' : '生成封面与正文配图'}
+            {imageGenerator === 'mcp' && mcpWaiting ? <Button type="button" variant="danger" onClick={() => mcpAbort.current?.abort()}>停止等待</Button> : null}
+            {imageGenerator === 'model' && retryable.length ? <Button type="button" variant="danger" onClick={() => void generate('retry')} busy={busy}>明确重试失败项</Button> : null}
+            <Button
+              type="button"
+              variant="primary"
+              onClick={() => void generate('new')}
+              busy={busy}
+              disabled={!plan || (imageGenerator === 'model' ? !modelId : (!mcpReady || !config.mcp_image_tool)) || batch?.state === 'running' || batch?.state === 'canceling'}
+            >
+              {batch ? (imageGenerator === 'mcp' ? '重新生成全部图片（会再次调用成功项）' : '重新生成全部图片') : '生成封面与正文配图'}
             </Button>
           </>
         )}
       </div>
       {imageSource === 'user' ? <div className="notice info">本篇使用你提供的图片，不会调用生图模型。封面先导入一张，正文图片按图位顺序批量导入。</div> : null}
-      {unknown.length ? <div className="notice warning">有 {unknown.length} 张图结果未知，不会自动重发。请检查后台或批次记录，确认后再选择“重新生成全部图片”。</div> : null}
+      {unknown.length ? <div className="notice warning">有 {unknown.length} 张图结果未知，不会自动重发。批次目录的 mcp-generation.json 已记录任务 ID，请先检查后台，确认后再选择“重新生成全部图片”。</div> : null}
+      {imageGenerator === 'mcp' && batch?.items?.some((item: any) => ['failed', 'save-failed'].includes(item.state)) ? <div className="notice warning">MCP 模式暂不支持只重试失败项；重新生成会再次调用已成功项并可能重复计费。</div> : null}
       <div className="toolbar toolbar-end">
         <Button type="button" onClick={() => void onSaved()} disabled={busy}>仅保存状态</Button>
         <Button type="button" variant="primary" onClick={() => void onNext()} disabled={busy}>确认配图，进入终审</Button>

@@ -35,6 +35,50 @@ test('generic recursive secret stripper reports dotted paths', () => {
   assert.deepEqual(result.removed.sort(), ['a.api_key', 'token']);
 });
 
+test('config export sanitizes MCP JSON argument strings and drops invalid templates', () => {
+  const result = sanitizeConfigForExport(`
+mcp_image_args: '{"prompt":"{{prompt}}","api_key":"leaked-key","key":"must-not-export","subscription_key":"must-not-export","headers":{"Authorization":"Bearer must-not-export"},"nested":"{\\"Authorization\\":\\"Bearer must-not-export\\"}"}'
+broken_mcp_image_args: keep
+`);
+  assert.doesNotMatch(result.text, /leaked-key|leaked-token|must-not-export/);
+  assert.match(result.text, /mcp_image_args/);
+  assert.match(result.text, /\{\{prompt\}\}/);
+  assert.ok(result.removed.includes('mcp_image_args.api_key'));
+  assert.ok(result.removed.includes('mcp_image_args.key'));
+  assert.ok(result.removed.includes('mcp_image_args.subscription_key'));
+  assert.ok(result.removed.includes('mcp_image_args.headers.Authorization'));
+
+  const invalid = sanitizeConfigForExport(`mcp_image_args: '{"api_key":"leaked-invalid"'`);
+  assert.doesNotMatch(invalid.text, /leaked-invalid|mcp_image_args/);
+  assert.ok(invalid.removed.includes('mcp_image_args'));
+});
+
+test('config export sanitizes object-form MCP arguments and common token names', () => {
+  const result = sanitizeConfigForExport(`
+mcp_image_args:
+  prompt: "{{prompt}}"
+  api_token: leaked-api-token
+  auth_token: leaked-auth-token
+  X-Auth-Token: leaked-header-token
+  credential: leaked-credential
+  nested: '{"apiToken":"leaked-nested-token","keep":"yes"}'
+  model: gemini-3.1-flash-image
+`);
+  assert.doesNotMatch(result.text, /leaked-/);
+  assert.match(result.text, /gemini-3\.1-flash-image/);
+  assert.ok(result.removed.includes('mcp_image_args.api_token'));
+  assert.ok(result.removed.includes('mcp_image_args.auth_token'));
+  assert.ok(result.removed.includes('mcp_image_args.X-Auth-Token'));
+  assert.ok(result.removed.includes('mcp_image_args.credential'));
+});
+
+test('config export fails closed for unkeyed secret material', () => {
+  assert.throws(
+    () => sanitizeConfigForExport('note: "-----BEGIN PRIVATE KEY-----\\nleaked\\n"'),
+    /无法安全剥离/,
+  );
+});
+
 test('preset YAML strips block scalars, flow maps and nested credential lists', () => {
   const result = sanitizeYamlForExport(`
 profile:

@@ -80,16 +80,18 @@ test('rewriting markers uses stable local image paths', () => {
 });
 
 test('generated outputs map in batch index order and crop centers', () => {
-  const plan = { prompts: ['a', 'b', 'c'] };
+  const plan = { prompts: ['a', 'b', 'c', 'd'] };
   const entries = [
     { kind: 'file', path: 'imgs/生成图-2-ai-abcdef12-2.png' },
     { kind: 'file', path: 'imgs/生成图-1-ai-abcdef12-1.png' },
     { kind: 'file', path: 'imgs/生成图-3-ai-abcdef12-3.png' },
+    { kind: 'file', path: 'imgs/生成图-4-ai-abcdef12-4.gif' },
   ];
   assert.deepEqual(mapGeneratedFiles(plan, entries).map(item => item.path), [
     'imgs/生成图-1-ai-abcdef12-1.png',
     'imgs/生成图-2-ai-abcdef12-2.png',
     'imgs/生成图-3-ai-abcdef12-3.png',
+    'imgs/生成图-4-ai-abcdef12-4.gif',
   ]);
   assert.deepEqual(centerCropRect(1000, 1000, 900, 383), { x: 0, y: 287, width: 1000, height: 426 });
   assert.deepEqual(targetImageSize('2.35:1'), { width: 900, height: 383 });
