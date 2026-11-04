@@ -219,7 +219,7 @@ function ProjectWorkspace({
           ) : active === 'format' ? (
             <FormatStage project={project} config={config} themeSummaries={themeSummaries} notify={notify} onSaved={() => void advance('format', { next: false })} onNext={() => void advance('format')} />
           ) : active === 'images' ? (
-            <ImagesStage project={project} config={config} servers={servers} imageModels={imageModels} modelId={preferences.imageModelId} notify={notify} onSaved={() => void advance('images', { next: false })} onNext={() => void advance('images')} onReload={onReload} />
+            <ImagesStage key={project.directory} project={project} config={config} servers={servers} imageModels={imageModels} modelId={preferences.imageModelId} notify={notify} onSaved={() => void advance('images', { next: false })} onNext={() => void advance('images')} onReload={onReload} />
           ) : active === 'final' ? (
             <FinalStage project={project} config={config} accounts={accounts} notify={notify} onSaved={() => void advance('final', { next: false })} onNext={() => void advance('final')} />
           ) : (
@@ -863,18 +863,37 @@ function ImagesStage({
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [mcpWaiting, setMcpWaiting] = useState(false);
-  const [coverStyle, setCoverStyle] = useState(String(config.cover_style || ''));
-  const [medium, setMedium] = useState(String(config.image_medium || ''));
+  const initialCoverImageStyle = String(project.article.cover_image_style || '').trim();
+  const initialMedium = String(project.article.image_medium || '').trim();
+  const [coverImageStyle, setCoverImageStyle] = useState(COVER_STYLES.includes(initialCoverImageStyle) ? initialCoverImageStyle : '');
+  const [medium, setMedium] = useState(IMAGE_MEDIA.includes(initialMedium) ? initialMedium : '');
+  const [planning, setPlanning] = useState(true);
   const [batchPath, setBatchPath] = useState('');
   const [previews, setPreviews] = useState<PreviewImage[]>([]);
   const [preview, setPreview] = useState<(PreviewImage & { url: string }) | null>(null);
   const mcpAbort = useRef<AbortController | null>(null);
+  const syncedCoverImageStyle = useRef(initialCoverImageStyle);
+  const syncedMedium = useRef(initialMedium);
   const imageSource = String(project.article.image_source || config.image_source || 'generated');
   const imageGenerator = config.image_generator === 'mcp' ? 'mcp' : 'model';
   const mcpServer = servers.find(server => server.id === config.mcp_image_server);
   const mcpReady = Boolean(mcpServer && mcpServer.status === 'ready');
 
   useEffect(() => () => mcpAbort.current?.abort(), []);
+
+  useEffect(() => {
+    const value = String(project.article.cover_image_style || '').trim();
+    if (value === syncedCoverImageStyle.current) return;
+    syncedCoverImageStyle.current = value;
+    setCoverImageStyle(COVER_STYLES.includes(value) ? value : '');
+  }, [project.article.cover_image_style]);
+
+  useEffect(() => {
+    const value = String(project.article.image_medium || '').trim();
+    if (value === syncedMedium.current) return;
+    syncedMedium.current = value;
+    setMedium(IMAGE_MEDIA.includes(value) ? value : '');
+  }, [project.article.image_medium]);
 
   useEffect(() => {
     if (!imageModels.some(model => model.id === modelId)) setModelId(imageModels[0]?.id || '');
@@ -885,12 +904,27 @@ function ImagesStage({
   }, [project.directory, project.files.imagePlan, project.article.cover_image, project.entries]);
 
   useEffect(() => {
+    let cancelled = false;
+    setPlanning(true);
     void callWorker<any>('planImages', {
       markdown: baseMarkdown,
-      config: { ...config, cover_style: coverStyle || config.cover_style, image_medium: medium || config.image_medium },
-      article: project.article,
-    }).then(setPlan).catch(error => notify(errorText(error), 'danger'));
-  }, [baseMarkdown, config, project.article, coverStyle, medium, notify]);
+      config,
+      article: {
+        ...project.article,
+        ...(coverImageStyle ? { cover_image_style: coverImageStyle } : {}),
+        ...(medium ? { image_medium: medium } : {}),
+      },
+    }).then(value => {
+      if (!cancelled) setPlan(value);
+    }).catch(error => {
+      if (!cancelled) notify(errorText(error), 'danger');
+    }).finally(() => {
+      if (!cancelled) setPlanning(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [baseMarkdown, config, project.article, coverImageStyle, medium, notify]);
 
   async function waitBatch(id: string) {
     for (let index = 0; index < 600; index += 1) {
@@ -1308,6 +1342,28 @@ function ImagesStage({
   const retryable = batch?.items?.filter((item: any) => ['failed', 'save-failed'].includes(item.state)) || [];
   const unknown = batch?.items?.filter((item: any) => item.state === 'unknown') || [];
 
+  async function saveSelection() {
+    const patch: Record<string, string> = {};
+    if (coverImageStyle && coverImageStyle !== String(project.article.cover_image_style || '').trim()) {
+      patch.cover_image_style = coverImageStyle;
+    }
+    if (medium && medium !== String(project.article.image_medium || '').trim()) {
+      patch.image_medium = medium;
+    }
+    if (Object.keys(patch).length) await saveArticle(api, project.directory, patch);
+  }
+
+  async function saveAndContinue(next: boolean) {
+    try {
+      await saveSelection();
+    } catch (error) {
+      notify(errorText(error), 'danger');
+      return;
+    }
+    if (next) onNext();
+    else onSaved();
+  }
+
   return (
     <div>
       <StageHeader title="配图" description="12 种封面、8 种正文形态、8 种统一媒介。信息位必须使用文章真实内容，实证图必须由你提供。" />
@@ -1324,12 +1380,12 @@ function ImagesStage({
           </Field>
         )}
         <Field label="封面形态">
-          <select value={plan?.cover?.style || coverStyle} onChange={event => setCoverStyle(event.target.value)}>
+          <select value={coverImageStyle || plan?.cover?.style || ''} onChange={event => setCoverImageStyle(event.target.value)}>
             {COVER_STYLES.map(name => <option key={name} value={name}>{name}</option>)}
           </select>
         </Field>
         <Field label="本篇统一媒介">
-          <select value={plan?.medium || medium} onChange={event => setMedium(event.target.value)}>
+          <select value={medium || plan?.medium || ''} onChange={event => setMedium(event.target.value)}>
             {IMAGE_MEDIA.map(name => <option key={name} value={name}>{name}</option>)}
           </select>
         </Field>
@@ -1388,19 +1444,19 @@ function ImagesStage({
       <div className="toolbar toolbar-end">
         {imageSource === 'user' ? (
           <>
-            <Button type="button" onClick={() => void importUserCover()} busy={busy} disabled={!plan}>导入封面</Button>
-            <Button type="button" variant="primary" onClick={() => void importUserBodyImages()} busy={busy} disabled={!plan || !plan.items.length}>导入正文图片</Button>
+            <Button type="button" onClick={() => void importUserCover()} busy={busy} disabled={!plan || planning}>导入封面</Button>
+            <Button type="button" variant="primary" onClick={() => void importUserBodyImages()} busy={busy} disabled={!plan || !plan.items.length || planning}>导入正文图片</Button>
           </>
         ) : (
           <>
             {imageGenerator === 'mcp' && mcpWaiting ? <Button type="button" variant="danger" onClick={() => mcpAbort.current?.abort()}>停止等待</Button> : null}
-            {imageGenerator === 'model' && retryable.length ? <Button type="button" variant="danger" onClick={() => void generate('retry')} busy={busy}>明确重试失败项</Button> : null}
+            {imageGenerator === 'model' && retryable.length ? <Button type="button" variant="danger" onClick={() => void generate('retry')} busy={busy} disabled={planning}>明确重试失败项</Button> : null}
             <Button
               type="button"
               variant="primary"
               onClick={() => void generate('new')}
               busy={busy}
-              disabled={!plan || (imageGenerator === 'model' ? !modelId : (!mcpReady || !config.mcp_image_tool)) || batch?.state === 'running' || batch?.state === 'canceling'}
+              disabled={!plan || planning || (imageGenerator === 'model' ? !modelId : (!mcpReady || !config.mcp_image_tool)) || batch?.state === 'running' || batch?.state === 'canceling'}
             >
               {batch ? (imageGenerator === 'mcp' ? '重新生成全部图片（会再次调用成功项）' : '重新生成全部图片') : '生成封面与正文配图'}
             </Button>
@@ -1411,8 +1467,8 @@ function ImagesStage({
       {unknown.length ? <div className="notice warning">有 {unknown.length} 张图结果未知，不会自动重发。批次目录的 mcp-generation.json 已记录任务 ID，请先检查后台，确认后再选择“重新生成全部图片”。</div> : null}
       {imageGenerator === 'mcp' && batch?.items?.some((item: any) => ['failed', 'save-failed'].includes(item.state)) ? <div className="notice warning">MCP 模式暂不支持只重试失败项；重新生成会再次调用已成功项并可能重复计费。</div> : null}
       <div className="toolbar toolbar-end">
-        <Button type="button" onClick={() => void onSaved()} disabled={busy}>仅保存状态</Button>
-        <Button type="button" variant="primary" onClick={() => void onNext()} disabled={busy}>确认配图，进入终审</Button>
+        <Button type="button" onClick={() => void saveAndContinue(false)} disabled={busy}>仅保存状态</Button>
+        <Button type="button" variant="primary" onClick={() => void saveAndContinue(true)} disabled={busy}>确认配图，进入终审</Button>
       </div>
       {preview ? (
         <Modal title={preview.title} onClose={() => setPreview(null)}>
