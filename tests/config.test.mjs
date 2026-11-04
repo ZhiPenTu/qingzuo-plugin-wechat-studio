@@ -5,8 +5,10 @@ import {
   DEFAULT_CONFIG,
   deepMerge,
   mergedConfig,
+  normalizeConfigForSave,
   resolvePreset,
   serializeConfig,
+  splitSummarySetting,
   validateConfig,
 } from '../src/lib/config.mjs';
 
@@ -60,4 +62,49 @@ test('config validation reports actionable invalid values', () => {
   assert.ok(errors.some(message => message.includes('发布方式')));
   assert.ok(errors.some(message => message.includes('草稿目录')));
   assert.ok(errors.some(message => message.includes('归档目录')));
+});
+
+test('summary setting splits a range from writing guidance', () => {
+  const value = '2-3句，60-100字；先给事件由头，再抛出反常识问题';
+  assert.deepEqual(splitSummarySetting(value), {
+    range: '60-100',
+    guidance: '2-3句；先给事件由头，再抛出反常识问题',
+  });
+  assert.deepEqual(splitSummarySetting('80-128'), { range: '80-128', guidance: '' });
+  assert.deepEqual(splitSummarySetting('60 至 100 字'), { range: '60-100', guidance: '' });
+  assert.deepEqual(splitSummarySetting(''), { range: '', guidance: '' });
+  assert.deepEqual(splitSummarySetting(null), { range: '', guidance: '' });
+});
+
+test('mixed summary setting validates and normalizes for save', () => {
+  const mixed = '2-3句，60-100字；先给事件由头，再抛出反常识问题';
+  assert.deepEqual(validateConfig({ summary_length: mixed }), []);
+  const normalized = normalizeConfigForSave({ summary_length: mixed });
+  assert.equal(normalized.summary_length, '60-100');
+  assert.ok(normalized.summary_guidance.includes('先给事件由头'));
+  assert.equal(normalizeConfigForSave({ summary_length: mixed, summary_guidance: '已有说明' }).summary_guidance, '已有说明');
+});
+
+test('merged config normalizes legacy mixed summary values', () => {
+  const merged = mergedConfig({ summary_length: '2-3句，60-100字；先给事件由头' });
+  assert.equal(merged.summary_length, '60-100');
+  assert.ok(merged.summary_guidance.includes('先给事件由头'));
+  assert.ok(validateConfig({ summary_length: 'long' }).some(message => message.includes('摘要')));
+});
+
+test('summary setting picks the first range when no unit marks one', () => {
+  assert.deepEqual(splitSummarySetting('先定 20-30 的样本，再看 80-128 的全文'), {
+    range: '20-30',
+    guidance: '先定 的样本，再看 80-128 的全文',
+  });
+  const merged = mergedConfig({}, { summary_length: '2-3句，60-100字；先给事件由头', summary_guidance: '已有说明' });
+  assert.equal(merged.summary_length, '60-100');
+  assert.equal(merged.summary_guidance, '已有说明');
+});
+
+test('normalized summary setting survives a serialization round trip', () => {
+  const normalized = normalizeConfigForSave({ summary_length: '2-3句，60-100字；先给事件由头' });
+  const restored = normalizeConfigForSave(YAML.parse(serializeConfig(normalized)));
+  assert.equal(restored.summary_length, '60-100');
+  assert.equal(restored.summary_guidance, normalized.summary_guidance);
 });

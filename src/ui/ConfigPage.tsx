@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { api, csv, errorText, parseCsv } from './client';
 import { Badge, Button, Field, Modal } from './common';
-import { DEFAULT_CONFIG, deepMerge, serializeConfig, validateConfig } from '../lib/config.mjs';
+import { DEFAULT_CONFIG, deepMerge, serializeConfig, splitSummarySetting, validateConfig } from '../lib/config.mjs';
 import { exportBundle, saveBundle } from '../lib/bundle.mjs';
 import type { ImageModel, McpServer, McpTool, TextModel, Toast, WechatAccount } from './types';
 import { normalizeConfigForSave } from '../lib/config.mjs';
@@ -16,6 +16,16 @@ const STEPS = [
   ['visual', '视觉呈现'],
   ['publish', '发布设置'],
 ] as const;
+
+function configDraft(config: Record<string, any>) {
+  const base = { ...DEFAULT_CONFIG, ...config };
+  const { range, guidance } = splitSummarySetting(base.summary_length);
+  return {
+    ...base,
+    summary_length: range || base.summary_length || '',
+    summary_guidance: String(base.summary_guidance ?? '').trim() ? base.summary_guidance : guidance,
+  };
+}
 
 export function ConfigPage({
   config,
@@ -43,7 +53,7 @@ export function ConfigPage({
   onWorkspace: () => Promise<void>;
 }) {
   const [step, setStep] = useState<(typeof STEPS)[number][0]>('account');
-  const [draft, setDraft] = useState<Record<string, any>>({ ...DEFAULT_CONFIG, ...config });
+  const [draft, setDraft] = useState<Record<string, any>>(() => configDraft(config));
   const [spec, setSpec] = useState(writingSpec);
   const [busy, setBusy] = useState(false);
   const [importPreview, setImportPreview] = useState<any>(null);
@@ -57,7 +67,7 @@ export function ConfigPage({
   const importToken = useRef('');
 
   useEffect(() => {
-    setDraft({ ...DEFAULT_CONFIG, ...config });
+    setDraft(configDraft(config));
   }, [config]);
   useEffect(() => setSpec(writingSpec), [writingSpec]);
   useEffect(() => {
@@ -129,9 +139,13 @@ export function ConfigPage({
       });
       const text = String(result.content || '').replace(/^```(?:json)?|```$/g, '').trim();
       const value = JSON.parse(text);
+      const summary = splitSummarySetting(value.summary_length);
+      const patch: Record<string, any> = Object.fromEntries(Object.entries(value).filter(([key, item]) => item !== undefined && key in DEFAULT_CONFIG));
+      if (summary.range) patch.summary_length = summary.range;
+      if (summary.guidance && !String(patch.summary_guidance ?? '').trim()) patch.summary_guidance = summary.guidance;
       setDraft(current => ({
         ...current,
-        ...Object.fromEntries(Object.entries(value).filter(([key, item]) => item !== undefined && key in DEFAULT_CONFIG)),
+        ...patch,
         ...(Array.isArray(value.default_structure) ? { custom_structure: value.default_structure } : {}),
       }));
       notify('已提炼并填入可识别的配置项。', 'success');
@@ -320,6 +334,7 @@ export function ConfigPage({
                 </Field>
                 <Field label="标题长度上限"><input type="number" min={1} max={80} value={draft.title_max_length || 25} onChange={event => update('title_max_length', Number(event.target.value))} /></Field>
                 <Field label="摘要字数范围"><input value={draft.summary_length || '80-128'} onChange={event => update('summary_length', event.target.value)} placeholder="80-128" /></Field>
+                <Field label="摘要写法" hint="会进入选题/写作提示词。"><input value={draft.summary_guidance || ''} onChange={event => update('summary_guidance', event.target.value)} placeholder="例如：2-3句；先给事件由头，再抛出反常识问题" /></Field>
                 <Field label="标题禁用词"><input value={csv(draft.forbidden_title_phrases)} onChange={event => update('forbidden_title_phrases', parseCsv(event.target.value))} placeholder="用顿号或逗号分隔" /></Field>
               </div>
               <Field label="文章结构候选池" hint="每行一个结构。写作时本篇会收敛为单元素列表。">

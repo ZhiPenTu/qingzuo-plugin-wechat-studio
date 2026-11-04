@@ -21,6 +21,7 @@ export const DEFAULT_CONFIG = {
   title_style: '干货型',
   title_max_length: 25,
   summary_length: '80-128',
+  summary_guidance: '',
   forbidden_title_phrases: [],
   writing_style: '口语化',
   paragraph_preference: '短段为主',
@@ -152,9 +153,36 @@ export function singlePreset(config, article, field, fallback = '') {
   return values.length ? values[0] : fallback;
 }
 
+const SUMMARY_RANGE_PATTERN = /(\d{1,4})\s*[-–—~～至]\s*(\d{1,4})/g;
+
+export function splitSummarySetting(value) {
+  if (typeof value !== 'string' || !value.trim()) return { range: '', guidance: '' };
+  const matches = [...value.matchAll(SUMMARY_RANGE_PATTERN)];
+  if (!matches.length) return { range: '', guidance: '' };
+  const preferred = matches.find(match => /^\s*字/.test(value.slice((match.index ?? 0) + match[0].length)));
+  const selected = preferred || matches[0];
+  const start = selected.index ?? 0;
+  const end = start + selected[0].length;
+  const range = selected[1] + '-' + selected[2];
+  const unit = /^\s*字/.exec(value.slice(end));
+  const cutoff = unit ? end + unit[0].length : end;
+  const guidance = (value.slice(0, start) + value.slice(cutoff))
+    .replace(/\s+([，,；;、])/g, '$1')
+    .replace(/[，,、；;]+/g, run => run[run.length - 1])
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/^[\s，,；;、]+|[\s，,；;、]+$/g, '')
+    .trim();
+  return { range, guidance };
+}
+
 export function mergedConfig(config = {}, article = {}) {
   const normalized = deepMerge(DEFAULT_CONFIG, config);
   const result = deepMerge(normalized, article || {});
+  const summary = splitSummarySetting(result.summary_length);
+  if (summary.range) {
+    result.summary_length = summary.range;
+    if (!String(result.summary_guidance ?? '').trim() && summary.guidance) result.summary_guidance = summary.guidance;
+  }
   for (const field of PRESET_FIELDS) result[`resolved_${field}`] = resolvePreset(normalized, article, field);
   return result;
 }
@@ -174,7 +202,8 @@ export function validateConfig(config) {
   const errors = [];
   const titleMax = Number(value.title_max_length);
   if (!Number.isInteger(titleMax) || titleMax < 1 || titleMax > 80) errors.push('标题长度应为 1–80。');
-  if (typeof value.summary_length !== 'string' || !/^\s*\d+\s*-\s*\d+\s*$/.test(value.summary_length)) errors.push('摘要字数范围应写成「80-128」。');
+  const pureSummaryRange = typeof value.summary_length === 'string' && /^\s*\d+\s*-\s*\d+\s*$/.test(value.summary_length);
+  if (!pureSummaryRange && !splitSummarySetting(value.summary_length).range) errors.push('摘要字数范围需包含类似「80-128」的字数区间。');
   if (!['generated', 'user'].includes(value.image_source)) errors.push('图片来源应为 generated 或 user。');
   if (!['2.35:1', '16:9', '1:1', '1.91:1'].includes(value.cover_aspect)) errors.push('封面比例无效。');
   if (!['有图注', '无图注', '关键图有'].includes(value.caption_style)) errors.push('图注规则无效。');
@@ -188,6 +217,9 @@ export function validateConfig(config) {
 
 export function normalizeConfigForSave(config = {}) {
   const value = deepMerge(DEFAULT_CONFIG, config);
+  const summary = splitSummarySetting(value.summary_length);
+  if (summary.range) value.summary_length = summary.range;
+  if (!String(value.summary_guidance ?? '').trim() && summary.guidance) value.summary_guidance = summary.guidance;
   value.title_max_length = Number(value.title_max_length) || 25;
   value.multi_image_count = Math.min(9, Math.max(1, Number(value.multi_image_count) || 6));
   value.wechat_publish_slot = Math.max(1, Number(value.wechat_publish_slot) || 1);
