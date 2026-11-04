@@ -14,6 +14,7 @@ export function configContext(config = {}, article = {}) {
     ['标题风格', merged.title_style],
     ['标题字数上限', merged.title_max_length],
     ['摘要字数', merged.summary_length],
+    ['摘要写法', merged.summary_guidance],
     ['目标字数', merged.target_word_count],
     ['图片来源', merged.image_source],
     ['配图密度', merged.image_density],
