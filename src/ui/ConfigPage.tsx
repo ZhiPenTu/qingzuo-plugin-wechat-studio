@@ -4,6 +4,7 @@ import { Badge, Button, Field, Modal } from './common';
 import { DEFAULT_CONFIG, deepMerge, serializeConfig, splitSummarySetting, validateConfig } from '../lib/config.mjs';
 import { exportBundle, saveBundle } from '../lib/bundle.mjs';
 import type { ImageModel, McpServer, McpTool, TextModel, Toast, WechatAccount } from './types';
+import { imageModelLabel } from '../lib/image-models.mjs';
 import { normalizeConfigForSave } from '../lib/config.mjs';
 import type { StudioPreferences } from './preferences';
 
@@ -438,7 +439,7 @@ export function ConfigPage({
                 <Field label="多图数量"><input type="number" min={1} max={9} value={draft.multi_image_count || 6} onChange={event => update('multi_image_count', Number(event.target.value))} /></Field>
                 <Field label="共享图片模型">
                   <select value={modelImageId} onChange={event => setModelImageId(event.target.value)}>
-                    {imageModels.map(model => <option key={model.id} value={model.id}>{model.title}</option>)}
+                    {imageModels.map(model => <option key={model.id} value={model.id}>{imageModelLabel(model)}</option>)}
                   </select>
                 </Field>
                 <Field label="图片来源">

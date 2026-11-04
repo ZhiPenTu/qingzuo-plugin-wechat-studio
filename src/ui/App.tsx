@@ -10,6 +10,7 @@ import { StickerPage } from './StickerPage';
 import { EMPTY_PREFERENCES, loadPreferences, type StudioPreferences } from './preferences';
 import { loadProject, listProjects } from '../lib/project.mjs';
 import { parseYamlObject } from '../lib/config.mjs';
+import { mergeImageModels } from '../lib/image-models.mjs';
 import { THEME_SUMMARY } from '../presets/index.mjs';
 import type {
   ArticleProject,
@@ -109,16 +110,20 @@ export function App() {
   }, []);
 
   const refreshCapabilities = useCallback(async () => {
-    const [serverValue, accountValue, textValue, imageValue] = await Promise.all([
+    const [serverValue, accountValue, textValue, officialImageValue, proxyImageValue] = await Promise.all([
       api.mcp.servers().catch(() => []),
       api.wechat.accounts().catch(() => []),
       api.ai.textModels().catch(() => ({ models: [] })),
       api.ai.models().catch(() => []),
+      api.ai.models({ source: 'proxy' }).catch(() => []),
     ]);
     const nextServers = Array.isArray(serverValue) ? serverValue : [];
     const nextAccounts = Array.isArray(accountValue) ? accountValue : [];
     const nextTextModels = Array.isArray(textValue?.models) ? textValue.models : [];
-    const nextImageModels = Array.isArray(imageValue) ? imageValue : [];
+    const nextImageModels = mergeImageModels(
+      Array.isArray(officialImageValue) ? officialImageValue : [],
+      Array.isArray(proxyImageValue) ? proxyImageValue : [],
+    );
     setServers(nextServers);
     setAccounts(nextAccounts);
     setTextModels(nextTextModels);

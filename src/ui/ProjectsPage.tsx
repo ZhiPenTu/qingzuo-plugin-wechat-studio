@@ -16,6 +16,7 @@ import {
   rewriteImageMarkersWithMapping,
 } from '../lib/images.mjs';
 import { compressBodyImageBytes, cropImageBytes, base64Bytes, bytesBase64 } from '../lib/crop.mjs';
+import { imageModelLabel, imageModelSource } from '../lib/image-models.mjs';
 import {
   appendLog,
   loadProject,
@@ -864,6 +865,10 @@ function ImagesStage({
   const imageSource = String(project.article.image_source || config.image_source || 'generated');
 
   useEffect(() => {
+    if (!imageModels.some(model => model.id === modelId)) setModelId(imageModels[0]?.id || '');
+  }, [imageModels, modelId]);
+
+  useEffect(() => {
     void callWorker<any>('planImages', {
       markdown: baseMarkdown,
       config: { ...config, cover_style: coverStyle || config.cover_style, image_medium: medium || config.image_medium },
@@ -905,6 +910,7 @@ function ImagesStage({
       } else {
         const created = await api.ai.batch.create({
           mode: 'generate',
+          source: imageModelSource(imageModels, modelId),
           modelId,
           prompt: plan.prompts[0],
           items: plan.prompts.map((prompt: string) => ({ prompt })),
@@ -1148,7 +1154,7 @@ function ImagesStage({
       <div className="form-grid form-grid-3">
         <Field label="图片模型">
           <select value={modelId} onChange={event => setModelId(event.target.value)}>
-            {imageModels.map(model => <option key={model.id} value={model.id}>{model.title}</option>)}
+            {imageModels.map(model => <option key={model.id} value={model.id}>{imageModelLabel(model)}</option>)}
           </select>
         </Field>
         <Field label="封面形态">
@@ -1162,7 +1168,7 @@ function ImagesStage({
           </select>
         </Field>
       </div>
-      {!imageModels.length ? <div className="notice warning">宿主尚未配置共享图片模型。请先到「设置 → AI」配置。</div> : null}
+      {!imageModels.length ? <div className="notice warning">没有读取到图片模型。请先在「设置 → AI」配置共享图片 Key，或在兼容服务中提供生图模型。</div> : null}
       {plan ? (
         <>
           <div className="image-plan">

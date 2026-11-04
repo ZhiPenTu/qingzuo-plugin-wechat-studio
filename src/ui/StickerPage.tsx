@@ -3,6 +3,7 @@ import { api, errorText, shortId } from './client';
 import { Badge, Button, Field } from './common';
 import { IMAGE_MEDIA, chooseMedium } from '../lib/images.mjs';
 import { buildStickerPrompt } from '../lib/prompts.mjs';
+import { imageModelLabel, imageModelSource } from '../lib/image-models.mjs';
 import type { ImageModel, Toast } from './types';
 import type { StudioPreferences } from './preferences';
 
@@ -43,8 +44,8 @@ export function StickerPage({
   useEffect(() => {
     if (preferences.imageModelId && imageModels.some(model => model.id === preferences.imageModelId)) {
       setModelId(preferences.imageModelId);
-    } else if (!modelId && imageModels[0]) {
-      setModelId(imageModels[0].id);
+    } else if (!imageModels.some(model => model.id === modelId)) {
+      setModelId(imageModels[0]?.id || '');
     }
   }, [imageModels, modelId, preferences.imageModelId]);
 
@@ -150,6 +151,7 @@ export function StickerPage({
         await api.workspace.mkdir({ path: dir + '/imgs' });
         const created = await api.ai.batch.create({
           mode: 'generate',
+          source: imageModelSource(imageModels, modelId),
           modelId,
           prompt: items[0].prompt,
           items: items.map(item => ({ prompt: item.prompt })),
@@ -253,7 +255,7 @@ export function StickerPage({
           </Field>
           <Field label="图片模型">
             <select value={modelId} onChange={event => setModelId(event.target.value)}>
-              {imageModels.map(model => <option key={model.id} value={model.id}>{model.title}</option>)}
+              {imageModels.map(model => <option key={model.id} value={model.id}>{imageModelLabel(model)}</option>)}
             </select>
           </Field>
         </div>
