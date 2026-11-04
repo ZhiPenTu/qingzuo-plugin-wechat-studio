@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { api, errorText, isMissingError, shortId } from './client';
+import { api, errorText, isMissingError, readOptional, shortId } from './client';
 import { Badge, Button, CopyButton, Empty, Field, Tabs } from './common';
 import { callWorker } from './worker-client';
 import { McpPanel } from './McpPanel';
@@ -21,7 +21,6 @@ import {
   loadProject,
   nextStage,
   previousStage,
-  readOptional,
   saveArticle,
   saveStage,
   stageProgress,
