@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { api, errorText, isMissingError, readOptional, shortId } from './client';
-import { Badge, Button, CopyButton, Empty, Field, Tabs } from './common';
+import { Badge, Button, CopyButton, Empty, Field, Modal, Tabs } from './common';
 import { callWorker } from './worker-client';
 import { McpPanel } from './McpPanel';
 import { buildReviewPrompt, buildTopicPrompt, buildWritingPrompt } from '../lib/prompts.mjs';
@@ -17,6 +17,7 @@ import {
 } from '../lib/images.mjs';
 import { compressBodyImageBytes, cropImageBytes, base64Bytes, bytesBase64 } from '../lib/crop.mjs';
 import { imageModelLabel, imageModelSource } from '../lib/image-models.mjs';
+import { projectImagePreviews } from '../lib/image-previews.mjs';
 import {
   appendLog,
   loadProject,
@@ -38,6 +39,7 @@ import type {
 import type { StudioPreferences } from './preferences';
 
 type Notify = (text: string, tone?: Toast['tone']) => void;
+type PreviewImage = { path: string; title: string; kind: 'cover' | 'body' };
 
 const STAGE_LABELS: Record<string, string> = {
   topic: '选题', research: '调研', writing: '写稿', review: '内容审',
@@ -216,7 +218,7 @@ function ProjectWorkspace({
           ) : active === 'format' ? (
             <FormatStage project={project} config={config} themeSummaries={themeSummaries} notify={notify} onSaved={() => void advance('format', { next: false })} onNext={() => void advance('format')} />
           ) : active === 'images' ? (
-            <ImagesStage project={project} config={config} imageModels={imageModels} modelId={preferences.imageModelId} notify={notify} onSaved={() => void advance('images', { next: false })} onNext={() => void advance('images')} />
+            <ImagesStage project={project} config={config} imageModels={imageModels} modelId={preferences.imageModelId} notify={notify} onSaved={() => void advance('images', { next: false })} onNext={() => void advance('images')} onReload={onReload} />
           ) : active === 'final' ? (
             <FinalStage project={project} config={config} accounts={accounts} notify={notify} onSaved={() => void advance('final', { next: false })} onNext={() => void advance('final')} />
           ) : (
@@ -848,10 +850,10 @@ function FormatStage({
 }
 
 function ImagesStage({
-  project, config, imageModels, modelId: preferredModelId, notify, onSaved, onNext,
+  project, config, imageModels, modelId: preferredModelId, notify, onSaved, onNext, onReload,
 }: {
   project: ArticleProject; config: Record<string, any>; imageModels: ImageModel[]; modelId: string; notify: Notify;
-  onSaved: () => void; onNext: () => void;
+  onSaved: () => void; onNext: () => void; onReload: () => Promise<void>;
 }) {
   const baseMarkdown = project.files.format || project.files.writing || '';
   const [plan, setPlan] = useState<any>(null);
@@ -862,11 +864,17 @@ function ImagesStage({
   const [coverStyle, setCoverStyle] = useState(String(config.cover_style || ''));
   const [medium, setMedium] = useState(String(config.image_medium || ''));
   const [batchPath, setBatchPath] = useState('');
+  const [previews, setPreviews] = useState<PreviewImage[]>([]);
+  const [preview, setPreview] = useState<(PreviewImage & { url: string }) | null>(null);
   const imageSource = String(project.article.image_source || config.image_source || 'generated');
 
   useEffect(() => {
     if (!imageModels.some(model => model.id === modelId)) setModelId(imageModels[0]?.id || '');
   }, [imageModels, modelId]);
+
+  useEffect(() => {
+    setPreviews(projectImagePreviews(project));
+  }, [project.directory, project.files.imagePlan, project.article.cover_image, project.entries]);
 
   useEffect(() => {
     void callWorker<any>('planImages', {
@@ -884,6 +892,31 @@ function ImagesStage({
       await new Promise(resolve => setTimeout(resolve, 1000));
     }
     throw new Error('等待图片生成超时。批次仍在宿主中，可稍后刷新状态，不会自动重发。');
+  }
+
+  async function openPreview(image: PreviewImage) {
+    try {
+      setPreview({ ...image, url: await api.workspace.url({ path: image.path }) });
+    } catch (error) {
+      notify(errorText(error), 'danger');
+    }
+  }
+
+  function previewsFromMapping(mapping: Record<number, string>, cover = ''): PreviewImage[] {
+    const previews: PreviewImage[] = [];
+    const coverValue = String(cover || project.article.cover_image || '').trim();
+    if (coverValue) {
+      const path = coverValue.startsWith(project.directory + '/') ? coverValue : project.directory + '/' + coverValue;
+      if (path === coverValue || project.entries.some(entry => entry.path === path)) {
+        previews.push({ path, title: '封面', kind: 'cover' });
+      }
+    }
+    for (const [position, item] of (plan?.items || []).entries()) {
+      const relative = mapping[item.index];
+      if (!relative) continue;
+      previews.push({ path: project.directory + '/' + relative, title: '配图 ' + (position + 1), kind: 'body' });
+    }
+    return previews;
   }
 
   async function generate(action: 'new' | 'retry' = 'new') {
@@ -985,6 +1018,8 @@ function ImagesStage({
         pic_crop_235_1: cover235Path.slice(project.directory.length + 1),
         pic_crop_1_1: cover11Path.slice(project.directory.length + 1),
       });
+      setPreviews(current => [{ path: coverPath, title: '封面', kind: 'cover' }, ...current.filter(item => item.kind !== 'cover')]);
+      await onReload().catch(() => {});
       setMessage('封面已保存。请检查手机预览中的裁切效果。');
       notify('已使用你提供的封面。', 'success');
     } catch (error) {
@@ -1043,6 +1078,8 @@ function ImagesStage({
         text: JSON.stringify({ ...plan, generated: mapping, source: 'user', batchId: null }, null, 2),
         overwrite: true,
       });
+      setPreviews(previewsFromMapping(mapping));
+      await onReload().catch(() => {});
       const missing = Math.max(0, plan.items.length - Object.keys(mapping).length);
       setMessage(missing ? '已导入 ' + files.length + ' 张，仍有 ' + missing + ' 个图位缺少图片。' : '正文图片已写入并更新文章。');
       notify(missing ? '部分图位仍缺少图片，请补充后再进入终审。' : '已使用你提供的正文图片。', missing ? 'warning' : 'success');
@@ -1141,6 +1178,8 @@ function ImagesStage({
       throw error;
     }
     const missing = (coverEntry ? 0 : 1) + generatedItems.filter((item: any) => !mapping[item.index]).length;
+    await onReload().catch(() => {});
+    setPreviews(previewsFromMapping(mapping, coverPath));
     setMessage('图片已写入文章目录并更新正文。');
     return { missing };
   }
@@ -1194,6 +1233,17 @@ function ImagesStage({
         </>
       ) : <div className="loading-inline"><span className="spinner" /> 正在规划图片…</div>}
       {message ? <div className="notice info">{message}</div> : null}
+      {previews.length ? (
+        <section className="generated-previews">
+          <div className="generated-preview-head">
+            <strong>已生成图片</strong>
+            <span>点击可查看大图</span>
+          </div>
+          <div className="generated-preview-grid">
+            {previews.map(image => <GeneratedPreview key={image.path} image={image} onOpen={openPreview} />)}
+          </div>
+        </section>
+      ) : null}
       {batch?.items?.length ? (
         <div className="batch-list">
           {batch.items.map((item: any, index: number) => (
@@ -1227,7 +1277,30 @@ function ImagesStage({
         <Button type="button" onClick={() => void onSaved()} disabled={busy}>仅保存状态</Button>
         <Button type="button" variant="primary" onClick={() => void onNext()} disabled={busy}>确认配图，进入终审</Button>
       </div>
+      {preview ? (
+        <Modal title={preview.title} onClose={() => setPreview(null)}>
+          <div className="media-stage"><img src={preview.url} alt={preview.title} /></div>
+        </Modal>
+      ) : null}
     </div>
+  );
+}
+
+function GeneratedPreview({ image, onOpen }: { image: PreviewImage; onOpen: (image: PreviewImage) => void }) {
+  const [url, setUrl] = useState('');
+  useEffect(() => {
+    void api.workspace.url({ path: image.path }).then(setUrl).catch(() => {});
+  }, [image.path]);
+  return (
+    <button
+      type="button"
+      className={'generated-preview-card' + (image.kind === 'cover' ? ' cover' : '')}
+      onClick={() => onOpen(image)}
+      title="点击查看大图"
+    >
+      {url ? <img src={url} alt={image.title} loading="lazy" /> : <span className="image-placeholder" />}
+      <span>{image.title}</span>
+    </button>
   );
 }
 

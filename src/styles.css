@@ -377,6 +377,16 @@ input::placeholder, textarea::placeholder { color: var(--qz-text-muted); opacity
 .output-strip figure { margin: 0; border: 1px solid var(--qz-border); border-radius: 8px; overflow: hidden; background: var(--qz-surface); }
 .output-strip img { width: 100%; display: block; aspect-ratio: 1; object-fit: cover; }
 .output-strip figcaption { padding: 9px; font-size: 11.5px; line-height: 1.5; }
+.generated-previews { margin: 14px 0; }
+.generated-preview-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 9px; }
+.generated-preview-head span { color: var(--qz-text-muted); font-size: 11.5px; }
+.generated-preview-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px; }
+.generated-preview-card { display: block; padding: 0; border: 1px solid var(--qz-border); border-radius: 8px; overflow: hidden; background: var(--qz-surface); text-align: left; cursor: zoom-in; }
+.generated-preview-card.cover { grid-column: span 2; }
+.generated-preview-card img { width: 100%; aspect-ratio: 16/9; object-fit: cover; display: block; }
+.generated-preview-card.cover img { aspect-ratio: 2.35/1; }
+.generated-preview-card > span { display: block; padding: 8px 9px; font-size: 12px; color: var(--qz-text-muted); }
+.generated-preview-card .image-placeholder { aspect-ratio: 16/9; }
 
 .modal-backdrop { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: 24px; background: rgb(0 0 0 / .38); }
 .modal { width: min(760px, 100%); max-height: min(84vh, 860px); display: flex; flex-direction: column; border: 1px solid var(--qz-border); border-radius: 9px; background: var(--qz-surface); box-shadow: 0 18px 50px rgb(0 0 0 / .16); }
@@ -438,7 +448,8 @@ input::placeholder, textarea::placeholder { color: var(--qz-text-muted); opacity
 
 @media (max-width: 600px) {
   h1 { font-size: 19px; }
-  .entry-grid, .quick-grid, .project-grid, .form-grid, .form-grid-3, .image-plan, .theme-preview-grid, .asset-image-grid, .output-strip { grid-template-columns: 1fr; }
+  .entry-grid, .quick-grid, .project-grid, .form-grid, .form-grid-3, .image-plan, .theme-preview-grid, .asset-image-grid, .output-strip, .generated-preview-grid { grid-template-columns: 1fr; }
+  .generated-preview-card.cover { grid-column: span 1; }
   .stage-rail { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .stage-step:nth-child(2n) { border-right: 0; }
   .stage-step { border-bottom: 1px solid var(--qz-border); }
