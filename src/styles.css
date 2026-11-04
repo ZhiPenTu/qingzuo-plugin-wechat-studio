@@ -345,7 +345,6 @@ input::placeholder, textarea::placeholder { color: var(--qz-text-muted); opacity
 .theme-chip.active { border-color: var(--qz-primary); background: var(--qz-primary-wash); }
 .theme-chip > span { width: 20px; height: 20px; border-radius: 5px; }
 .theme-chip small { color: var(--qz-text-muted); font-size: 10.5px; line-height: 1.4; }
-.import-row { margin-top: 14px; border: 1px solid var(--qz-border); border-radius: 8px; background: var(--qz-surface); padding: 14px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: end; }
 
 .assets-layout { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 14px; align-items: start; }
 .product-list { border: 1px solid var(--qz-border); border-radius: 8px; background: var(--qz-surface-subtle); padding: 7px; display: grid; gap: 3px; }
@@ -459,8 +458,7 @@ input::placeholder, textarea::placeholder { color: var(--qz-text-muted); opacity
   .sidebar nav button { font-size: 12px; }
   .panel, .stage-workspace, .config-panel, .product-panel { padding: 13px; }
   .article-input { min-height: 360px; }
-  .config-savebar, .archive-box, .import-row { flex-direction: column; align-items: stretch; }
-  .import-row { display: flex; }
+  .config-savebar, .archive-box { flex-direction: column; align-items: stretch; }
   .toolbar-end { justify-content: stretch; }
   .toolbar-end .button { flex: 1; }
 }

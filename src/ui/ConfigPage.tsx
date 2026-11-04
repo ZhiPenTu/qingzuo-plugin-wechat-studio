@@ -58,8 +58,7 @@ export function ConfigPage({
   const [spec, setSpec] = useState(writingSpec);
   const [busy, setBusy] = useState(false);
   const [importPreview, setImportPreview] = useState<any>(null);
-  const [importSource, setImportSource] = useState<{ fileToken?: string; url?: string } | null>(null);
-  const [importUrl, setImportUrl] = useState('');
+  const [importSource, setImportSource] = useState<{ fileToken?: string } | null>(null);
   const [benchmark, setBenchmark] = useState('');
   const [modelTextId, setModelTextId] = useState('');
   const [modelImageId, setModelImageId] = useState('');
@@ -215,7 +214,7 @@ export function ConfigPage({
     }
   }
 
-  async function previewImport(source: { fileToken?: string; url?: string }) {
+  async function previewImport(source: { fileToken?: string }) {
     setBusy(true);
     try {
       const value = await api.workspace.importBundle({ ...source, dryRun: true });
@@ -513,13 +512,6 @@ export function ConfigPage({
             <Button type="button" variant="primary" onClick={() => void save()} busy={busy}>保存全部配置</Button>
           </div>
         </section>
-      </div>
-
-      <div className="import-row">
-        <Field label="从 aiworkskills.cn 下载 .aws">
-          <input value={importUrl} onChange={event => setImportUrl(event.target.value)} placeholder="https://aiworkskills.cn/…/preset.aws" />
-        </Field>
-        <Button type="button" onClick={() => void previewImport({ url: importUrl })} disabled={!importUrl.trim()} busy={busy}>预览下载</Button>
       </div>
 
       {importPreview ? (
