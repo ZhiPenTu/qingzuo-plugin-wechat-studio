@@ -65,6 +65,23 @@ test('image plan honors configured cover and body style candidates', () => {
   assert.equal(plan.items.every(item => item.style === '清单要点'), true);
 });
 
+test('image plan honors per-article cover and medium selections', () => {
+  const plan = planImages(article, {
+    custom_cover_image_style: ['对比式'],
+    image_medium: '扁平矢量',
+  }, {
+    cover_image_style: '菜品特写',
+    image_medium: '打印稿批注',
+  });
+  assert.equal(plan.cover.style, '菜品特写');
+  assert.equal(plan.medium, '打印稿批注');
+});
+
+test('invalid per-article cover style falls back to configured candidates', () => {
+  const plan = planImages(article, { custom_cover_image_style: ['对比式'] }, { cover_image_style: '不存在的形态' });
+  assert.equal(plan.cover.style, '对比式');
+});
+
 test('user image mode never creates image-generation prompts', () => {
   const plan = planImages(article, { image_source: 'user' }, {});
   assert.equal(plan.cover.generate, false);
