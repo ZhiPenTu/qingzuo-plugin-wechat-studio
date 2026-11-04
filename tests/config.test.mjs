@@ -64,6 +64,22 @@ test('config validation reports actionable invalid values', () => {
   assert.ok(errors.some(message => message.includes('归档目录')));
 });
 
+test('MCP image generation requires a server, tool and valid argument template', () => {
+  const valid = validateConfig({ ...DEFAULT_CONFIG, image_generator: 'mcp', mcp_image_server: 'mcp-1', mcp_image_tool: 'generate_image' });
+  assert.deepEqual(valid, []);
+  const missing = validateConfig({ ...DEFAULT_CONFIG, image_generator: 'mcp', mcp_image_args: '[]' });
+  assert.equal(missing.some(item => item.includes('MCP 服务')), true);
+  assert.equal(missing.some(item => item.includes('JSON 对象')), true);
+  assert.deepEqual(validateConfig({
+    ...DEFAULT_CONFIG,
+    image_source: 'user',
+    image_generator: 'mcp',
+    mcp_image_server: '',
+    mcp_image_tool: '',
+    mcp_image_args: '[]',
+  }), []);
+});
+
 test('summary setting splits a range from writing guidance', () => {
   const value = '2-3句，60-100字；先给事件由头，再抛出反常识问题';
   assert.deepEqual(splitSummarySetting(value), {

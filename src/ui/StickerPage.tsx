@@ -1,10 +1,11 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api, errorText, shortId } from './client';
 import { Badge, Button, Field } from './common';
 import { IMAGE_MEDIA, chooseMedium } from '../lib/images.mjs';
 import { buildStickerPrompt } from '../lib/prompts.mjs';
 import { imageModelLabel, imageModelSource } from '../lib/image-models.mjs';
-import type { ImageModel, Toast } from './types';
+import { generateImagesThroughMcp, mcpBatchToken } from '../lib/mcp-images.mjs';
+import type { ImageModel, McpServer, Toast } from './types';
 import type { StudioPreferences } from './preferences';
 
 type Notify = (text: string, tone?: Toast['tone']) => void;
@@ -16,12 +17,14 @@ function stickerId() {
 
 export function StickerPage({
   config,
+  servers,
   imageModels,
   preferences,
   notify,
   onChanged,
 }: {
   config: Record<string, any>;
+  servers: McpServer[];
   imageModels: ImageModel[];
   preferences: StudioPreferences;
   notify: Notify;
@@ -36,10 +39,17 @@ export function StickerPage({
   const [title, setTitle] = useState('');
   const [planning, setPlanning] = useState(false);
   const [generating, setGenerating] = useState(false);
+  const [mcpWaiting, setMcpWaiting] = useState(false);
   const [batch, setBatch] = useState<any>(null);
   const [directory, setDirectory] = useState('');
   const [outputFiles, setOutputFiles] = useState<any[]>([]);
   const [filesByItem, setFilesByItem] = useState<Record<string, string>>({});
+  const mcpAbort = useRef<AbortController | null>(null);
+  const imageGenerator = config.image_generator === 'mcp' ? 'mcp' : 'model';
+  const mcpServer = servers.find(server => server.id === config.mcp_image_server);
+  const mcpReady = Boolean(mcpServer && mcpServer.status === 'ready');
+
+  useEffect(() => () => mcpAbort.current?.abort(), []);
 
   useEffect(() => {
     if (preferences.imageModelId && imageModels.some(model => model.id === preferences.imageModelId)) {
@@ -122,8 +132,145 @@ export function StickerPage({
   }
 
   async function generate(action: 'new' | 'retry' = 'new') {
-    if (!items.length || !modelId) {
-      notify('请先生成方案并选择图片模型。', 'warning');
+    if (!items.length || (imageGenerator !== 'mcp' && !modelId)) {
+      notify(imageGenerator === 'mcp' ? '请先生成方案并完成 MCP 生图配置。' : '请先生成方案并选择图片模型。', 'warning');
+      return;
+    }
+    if (imageGenerator === 'mcp') {
+      if (!config.mcp_image_server || !config.mcp_image_tool || !mcpReady) {
+        notify('请先在配置中心选择当前可用的 MCP 服务和生图工具。', 'warning');
+        return;
+      }
+      setGenerating(true);
+      const date = new Date();
+      const stamp = date.getFullYear() + String(date.getMonth() + 1).padStart(2, '0') + String(date.getDate()).padStart(2, '0');
+      const slug = (title || topic).replace(/[^\u3400-\u9fffA-Za-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 28) || 'stickers';
+      const runToken = mcpBatchToken();
+      const dir = 'posts/stickers/' + stamp + '-' + slug + '-' + runToken;
+      const outputDirectory = dir + '/imgs';
+      const controller = new AbortController();
+      mcpAbort.current = controller;
+      let producedFiles = 0;
+      try {
+        await api.workspace.mkdir({ path: dir });
+        await api.workspace.mkdir({ path: outputDirectory });
+        setMcpWaiting(true);
+        const result = await generateImagesThroughMcp({
+          api,
+          serverId: config.mcp_image_server,
+          toolName: config.mcp_image_tool,
+          argsTemplate: config.mcp_image_args,
+          prompts: items.map(item => item.prompt),
+          directory: outputDirectory,
+          sizeFor: () => '1:1',
+          signal: controller.signal,
+        });
+        producedFiles = result.files.length;
+        setMcpWaiting(false);
+        const issueByIndex = new Map([...result.failures, ...result.unknowns].map(item => [item.index, item]));
+        const errorByIndex = new Map([...issueByIndex].map(([index, issue]) => [index, issue.error]));
+        const unknownIndexes = new Set(result.unknowns.map(item => item.index));
+        if (result.abortedIndex) unknownIndexes.add(result.abortedIndex);
+        const succeeded = new Set(result.files.map(file => file.index));
+        const value = {
+          id: 'mcp-' + runToken,
+          revision: 1,
+          state: result.aborted || result.fatal ? 'interrupted' : 'finished',
+          items: items.map((item, index) => ({
+            id: 'mcp-' + (index + 1),
+            name: '生成图-' + (index + 1),
+            state: succeeded.has(index + 1)
+              ? 'succeeded'
+              : unknownIndexes.has(index + 1)
+                ? 'unknown'
+                : result.aborted || result.fatal
+                  ? 'canceled'
+                  : 'failed',
+            error: errorByIndex.get(index + 1) || null,
+            taskId: issueByIndex.get(index + 1)?.taskId || (result.abortedIndex === index + 1 ? result.abortedTaskId : '') || null,
+            prompt: item.prompt,
+          })),
+        };
+        setBatch(value);
+        setDirectory(dir);
+        const hasRecovery = producedFiles > 0 || result.unknowns.length > 0 || Boolean(result.abortedTaskId);
+        if (result.fatal && !result.files.length && !hasRecovery) {
+          await api.workspace.remove({ path: dir, recursive: true }).catch(() => {});
+          setDirectory('');
+          notify(result.fatal, 'danger');
+          return;
+        }
+        if (result.aborted && !result.files.length && !hasRecovery) {
+          await api.workspace.remove({ path: dir, recursive: true }).catch(() => {});
+          setDirectory('');
+          notify('已停止等待，当前没有已写入的贴图；任务可能仍在 MCP 服务端进行。', 'warning');
+          return;
+        }
+        if (!result.files.length) {
+          if (result.unknowns.length) {
+            notify('MCP 没有生成可用贴图；结果未知，任务 ID 已写入 ' + dir + '/mcp-generation.json。', 'warning');
+            return;
+          }
+          if (result.fatal) {
+            notify(result.fatal, 'danger');
+            return;
+          }
+          if (result.aborted) {
+            notify('已停止等待，当前没有已写入的贴图；任务可能仍在 MCP 服务端进行。'
+              + (hasRecovery ? ' 结果记录在 ' + dir + '/mcp-generation.json。' : ''), 'warning');
+            return;
+          }
+          const first = result.failures[0]?.error;
+          throw new Error('MCP 没有生成任何可用贴图。' + (first ? '首个错误：' + first : ''));
+        }
+        const entries = await api.workspace.list({ path: outputDirectory, recursive: false });
+        const generated = entries
+          .filter((entry: any) => entry.kind === 'file' && /生成图-\d+-ai-/.test(entry.path))
+          .map((entry: any) => ({ ...entry, batchIndex: Number(entry.path.match(/生成图-(\d+)/)?.[1] || 0) }))
+          .filter((entry: any) => entry.batchIndex > 0);
+        for (const entry of generated) {
+          const extension = entry.path.split('.').pop()?.toLowerCase() || 'png';
+          const item = items[entry.batchIndex - 1];
+          if (!item) continue;
+          await api.workspace.rename({
+            from: entry.path,
+            to: outputDirectory + '/sticker-' + item.id + '.' + extension,
+          });
+        }
+        const output = await api.workspace.list({ path: outputDirectory, recursive: false });
+        const mapping: Record<string, string> = {};
+        for (const item of items) {
+          const file = output.find((entry: any) => entry.kind === 'file' && entry.name.startsWith('sticker-' + item.id + '.'));
+          if (file) mapping[item.id] = file.path;
+        }
+        setOutputFiles(output);
+        setFilesByItem(mapping);
+        await persistPlan(dir, mapping);
+        await onChanged();
+        const missing = items.length - Object.keys(mapping).length;
+        if (result.fatal) {
+          notify(result.fatal + ' 已生成的 ' + producedFiles + ' 张贴图保留在 ' + dir + '。', 'danger');
+        } else if (result.aborted) {
+          notify('已停止等待，已生成 ' + producedFiles + ' 张贴图并保存到 ' + dir + '；后续任务可能仍在 MCP 服务端进行。', 'warning');
+        } else if (missing || result.failures.length) {
+          notify('贴图方案已保存，仍有 ' + Math.max(0, missing) + ' 张缺失。' + (result.failures[0]?.error ? '首个错误：' + result.failures[0].error : ''), 'warning');
+        } else {
+          notify('整组贴图已通过 MCP 生成并保存到 ' + dir + '。', 'success');
+        }
+      } catch (error) {
+        setMcpWaiting(false);
+        const reason = errorText(error);
+        if (producedFiles) {
+          notify(reason + ' 已生成的 ' + producedFiles + ' 张贴图保留在 ' + dir + '。', 'danger');
+        } else {
+          await api.workspace.remove({ path: dir, recursive: true }).catch(() => {});
+          notify(reason, 'danger');
+        }
+      } finally {
+        mcpAbort.current = null;
+        setMcpWaiting(false);
+        setGenerating(false);
+      }
       return;
     }
     setGenerating(true);
@@ -253,15 +400,23 @@ export function StickerPage({
               {IMAGE_MEDIA.map(value => <option key={value}>{value}</option>)}
             </select>
           </Field>
+        {imageGenerator === 'mcp' ? (
+          <Field label="MCP 生图">
+            <input readOnly value={(mcpServer?.name || '未选择服务') + ' · ' + (config.mcp_image_tool || '未选择工具')} />
+          </Field>
+        ) : (
           <Field label="图片模型">
             <select value={modelId} onChange={event => setModelId(event.target.value)}>
               {imageModels.map(model => <option key={model.id} value={model.id}>{imageModelLabel(model)}</option>)}
             </select>
           </Field>
+        )}
         </div>
         <div className="toolbar toolbar-end">
           <Button type="button" variant="primary" onClick={() => void plan()} busy={planning}>生成方案与配文</Button>
         </div>
+        {imageGenerator === 'mcp' && !mcpReady ? <div className="notice warning">配置中的 MCP 服务当前不可用，请到配置中心重新选择并确认连接状态。</div> : null}
+        {imageGenerator === 'mcp' ? <div className="notice info">整组贴图将通过 MCP 工具生成。首次调用会请求你单独授权该工具；工具可能产生费用。</div> : null}
       </section>
 
       {items.length ? (
@@ -285,10 +440,10 @@ export function StickerPage({
                   </div>
                 </header>
                 <Field label="画面提示词">
-                  <textarea value={item.prompt} onChange={event => setItems(current => current.map((entry, itemIndex) => itemIndex === index ? { ...entry, prompt: event.target.value } : entry))} rows={5} />
+                  <textarea value={item.prompt} onChange={event => setItems(current => current.map((entry, itemIndex) => itemIndex === index ? { ...entry, prompt: event.target.value } : entry))} rows={5} disabled={generating} />
                 </Field>
                 <Field label="配文">
-                  <textarea value={item.caption} onChange={event => setItems(current => current.map((entry, itemIndex) => itemIndex === index ? { ...entry, caption: event.target.value } : entry))} rows={3} />
+                  <textarea value={item.caption} onChange={event => setItems(current => current.map((entry, itemIndex) => itemIndex === index ? { ...entry, caption: event.target.value } : entry))} rows={3} disabled={generating} />
                 </Field>
               </article>
             ))}
@@ -299,13 +454,16 @@ export function StickerPage({
                 <div key={item.id}>
                   <strong>{item.name}</strong>
                   <Badge tone={item.state === 'succeeded' ? 'success' : ['failed', 'unknown'].includes(item.state) ? 'danger' : 'neutral'}>{item.state}</Badge>
-                  {item.error ? <small>{item.error}</small> : null}
+                  {item.error ? <small>{item.error}{item.taskId ? ' · 任务 ID：' + item.taskId : ''}</small> : null}
                 </div>
               ))}
             </div>
           ) : null}
           {batch?.items?.some((item: any) => item.state === 'unknown') ? (
-            <div className="notice warning">有图片生成结果未知，不会自动重发。请先检查后台记录，确认后再重新生成。</div>
+            <div className="notice warning">有图片生成结果未知，不会自动重发。贴图目录的 mcp-generation.json 已记录任务 ID，请先检查后台，确认后再重新生成。</div>
+          ) : null}
+          {imageGenerator === 'mcp' && batch?.items?.some((item: any) => ['failed', 'save-failed'].includes(item.state)) ? (
+            <div className="notice warning">MCP 模式暂不支持只重试失败项；重新生成会再次调用已成功项并可能重复计费。</div>
           ) : null}
           {outputFiles.length ? (
             <div className="output-strip">
@@ -315,11 +473,20 @@ export function StickerPage({
             </div>
           ) : null}
           <div className="toolbar toolbar-end">
-            {batch?.items?.some((item: any) => ['failed', 'save-failed'].includes(item.state)) ? (
+            {imageGenerator === 'model' && batch?.items?.some((item: any) => ['failed', 'save-failed'].includes(item.state)) ? (
               <Button type="button" variant="danger" onClick={() => void generate('retry')} busy={generating}>明确重试失败项</Button>
             ) : null}
+            {imageGenerator === 'mcp' && mcpWaiting ? <Button type="button" variant="danger" onClick={() => mcpAbort.current?.abort()}>停止等待</Button> : null}
             <Button type="button" onClick={() => void persistPlan()} disabled={!directory}>仅保存方案</Button>
-            <Button type="button" variant="primary" onClick={() => void generate('new')} busy={generating} disabled={!modelId}>{batch ? '重新生成整组' : '确认方案并批量生成'}</Button>
+            <Button
+              type="button"
+              variant="primary"
+              onClick={() => void generate('new')}
+              busy={generating}
+              disabled={imageGenerator === 'model' ? !modelId : (!mcpReady || !config.mcp_image_tool)}
+            >
+              {batch ? (imageGenerator === 'mcp' ? '重新生成整组（会再次调用成功项）' : '重新生成整组') : '确认方案并批量生成'}
+            </Button>
           </div>
         </section>
       ) : null}

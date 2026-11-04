@@ -5,6 +5,7 @@ import { DEFAULT_CONFIG, deepMerge, serializeConfig, splitSummarySetting, valida
 import { exportBundle, saveBundle } from '../lib/bundle.mjs';
 import type { ImageModel, McpServer, McpTool, TextModel, Toast, WechatAccount } from './types';
 import { imageModelLabel } from '../lib/image-models.mjs';
+import { mcpServerStatusLabel } from '../lib/mcp-images.mjs';
 import { normalizeConfigForSave } from '../lib/config.mjs';
 import type { StudioPreferences } from './preferences';
 
@@ -62,6 +63,8 @@ export function ConfigPage({
   const [benchmark, setBenchmark] = useState('');
   const [modelTextId, setModelTextId] = useState('');
   const [modelImageId, setModelImageId] = useState('');
+  const [imageMcpTools, setImageMcpTools] = useState<McpTool[]>([]);
+  const [imageMcpError, setImageMcpError] = useState('');
   const [accountId, setAccountId] = useState('');
   const [embedsText, setEmbedsText] = useState('');
   const importToken = useRef('');
@@ -78,8 +81,34 @@ export function ConfigPage({
   useEffect(() => {
     setEmbedsText(JSON.stringify(draft.embeds || DEFAULT_CONFIG.embeds, null, 2));
   }, [draft.embeds]);
+  useEffect(() => {
+    const serverId = String(draft.mcp_image_server || '');
+    if (!serverId) {
+      setImageMcpTools([]);
+      setImageMcpError('');
+      return;
+    }
+    let alive = true;
+    setImageMcpError('');
+    api.mcp.tools({ serverId })
+      .then((value: McpTool[]) => {
+        if (!alive) return;
+        const tools = Array.isArray(value) ? value : [];
+        setImageMcpTools(tools);
+        setDraft(current => current.mcp_image_tool && !tools.some(tool => tool.name === current.mcp_image_tool)
+          ? { ...current, mcp_image_tool: '' }
+          : current);
+      })
+      .catch((error: unknown) => {
+        if (!alive) return;
+        setImageMcpTools([]);
+        setImageMcpError(errorText(error));
+      });
+    return () => { alive = false; };
+  }, [draft.mcp_image_server]);
 
   const validation = useMemo(() => validateConfig(draft), [draft]);
+  const selectedMcpTool = imageMcpTools.find(tool => tool.name === draft.mcp_image_tool);
 
   function update(key: string, value: unknown) {
     setDraft(current => ({ ...current, [key]: value }));
@@ -393,7 +422,7 @@ export function ConfigPage({
               </Field>
             </ConfigSection>
           ) : step === 'visual' ? (
-            <ConfigSection title="视觉呈现" description="8 套主题 × 3 套配色，图片模型来自底座共享能力。">
+            <ConfigSection title="视觉呈现" description="8 套主题 × 3 套配色；图片可来自底座共享模型，也可调用经授权的 MCP 生图工具。">
               <div className="form-grid form-grid-3">
                 <Field label="排版主题">
                   <select
@@ -436,18 +465,59 @@ export function ConfigPage({
                   </select>
                 </Field>
                 <Field label="多图数量"><input type="number" min={1} max={9} value={draft.multi_image_count || 6} onChange={event => update('multi_image_count', Number(event.target.value))} /></Field>
-                <Field label="共享图片模型">
-                  <select value={modelImageId} onChange={event => setModelImageId(event.target.value)}>
-                    {imageModels.map(model => <option key={model.id} value={model.id}>{imageModelLabel(model)}</option>)}
+                <Field label="生图方式">
+                  <select value={draft.image_generator === 'mcp' ? 'mcp' : 'model'} onChange={event => update('image_generator', event.target.value)}>
+                    <option value="model">共享 AI 图片模型</option>
+                    <option value="mcp">MCP 生图工具</option>
                   </select>
                 </Field>
+                {draft.image_generator === 'mcp' ? (
+                  <Field label="MCP 服务">
+                    <select
+                      value={draft.mcp_image_server || ''}
+                      onChange={event => {
+                        update('mcp_image_server', event.target.value);
+                        update('mcp_image_tool', '');
+                      }}
+                    >
+                      <option value="">选择 MCP 服务</option>
+                      {servers.map(server => <option key={server.id} value={server.id}>{server.name} · {mcpServerStatusLabel(server.status)}</option>)}
+                    </select>
+                  </Field>
+                ) : (
+                  <Field label="共享图片模型">
+                    <select value={modelImageId} onChange={event => setModelImageId(event.target.value)}>
+                      {imageModels.map(model => <option key={model.id} value={model.id}>{imageModelLabel(model)}</option>)}
+                    </select>
+                  </Field>
+                )}
                 <Field label="图片来源">
                   <select value={draft.image_source || 'generated'} onChange={event => update('image_source', event.target.value)}>
-                    <option value="generated">共享 AI 生成</option>
+                    <option value="generated">AI 生成（模型或 MCP）</option>
                     <option value="user">使用我提供的图片</option>
                   </select>
                 </Field>
               </div>
+              {draft.image_generator === 'mcp' ? (
+                <>
+                  <Field label="生图工具" hint="首次调用时轻作会要求你单独授权该工具；生图工具可能产生费用或修改外部数据。">
+                    <select value={draft.mcp_image_tool || ''} onChange={event => update('mcp_image_tool', event.target.value)} disabled={!draft.mcp_image_server}>
+                      <option value="">{draft.mcp_image_server ? '选择生图工具' : '请先选择 MCP 服务'}</option>
+                      {imageMcpTools.map(tool => (
+                        <option key={tool.name} value={tool.name}>
+                          {tool.title || tool.name}{tool.readOnly ? ' · 服务声明只读' : ' · 会执行操作'}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                  <Field label="工具参数模板" hint="JSON 对象，可填 {{prompt}}、{{size}}、{{count}} 占位符；模型名等工具参数直接写在模板里。">
+                    <textarea className="code-input" value={draft.mcp_image_args || ''} onChange={event => update('mcp_image_args', event.target.value)} rows={6} spellCheck={false} />
+                  </Field>
+                  {selectedMcpTool?.description ? <div className="notice info"><strong>工具说明</strong><p>{selectedMcpTool.description}</p></div> : null}
+                  {!servers.length ? <div className="notice warning">尚未配置 MCP 服务。请先在「设置 → 能力连接」添加并测试生图服务。</div> : null}
+                  {draft.mcp_image_server && !imageMcpTools.length ? <div className="notice warning">{imageMcpError ? '读取工具失败：' + imageMcpError : '没有读取到该服务的工具。请检查服务状态，或升级到支持调用 MCP 工具的轻作版本。'}</div> : null}
+                </>
+              ) : null}
               <div className="theme-preview-grid">
                 {themeSummaries.map((theme: any) => (
                   <button

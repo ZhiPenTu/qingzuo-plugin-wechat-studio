@@ -21,6 +21,13 @@ const SENSITIVE_KEYS = new Set([
   'wechataccounts',
   'writingmodel',
   'imagemodel',
+  'key',
+  'accesskey',
+  'secretaccesskey',
+  'subscriptionkey',
+  'privatekey',
+  'encryptionkey',
+  'signingkey',
   'apikey',
   'baseurl',
   'endpoint',
@@ -45,6 +52,8 @@ function isSensitiveKey(value) {
   const key = normalizedKey(value);
   return SENSITIVE_KEYS.has(key)
     || key.endsWith('apikey')
+    || key.endsWith('token')
+    || key.endsWith('credential')
     || key.endsWith('appsecret')
     || key.endsWith('accesstoken')
     || key.endsWith('refreshtoken')
@@ -181,12 +190,73 @@ function scrubSensitiveLines(source, label, removed) {
   return output.join('\n');
 }
 
+function sanitizeEmbeddedJson(value, label, removed) {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
+      try {
+        const parsed = JSON.parse(value);
+        if (parsed && typeof parsed === 'object') {
+          const stripped = stripSecrets(parsed);
+          for (const key of stripped.removed) removed.push(label + '.' + key);
+          return JSON.stringify(sanitizeEmbeddedJson(stripped.value, label, removed));
+        }
+      } catch {
+        // Treat a malformed nested JSON string as untrusted text below.
+      }
+    }
+    const nestedRemoved = [];
+    if (scrubInlineSecrets(value, label, nestedRemoved) !== value) {
+      removed.push(...nestedRemoved);
+      return '[已移除]';
+    }
+    return value;
+  }
+  if (Array.isArray(value)) return value.map(item => sanitizeEmbeddedJson(item, label, removed));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, sanitizeEmbeddedJson(child, label + '.' + key, removed)]));
+  }
+  return value;
+}
+
+function sanitizeMcpArgumentString(text, removed) {
+  try {
+    const parsed = JSON.parse(text);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not an object');
+    const stripped = stripSecrets(parsed);
+    for (const key of stripped.removed) removed.push('mcp_image_args.' + key);
+    const sanitized = sanitizeEmbeddedJson(stripped.value, 'mcp_image_args', removed);
+    const serialized = JSON.stringify(sanitized, null, 2);
+    assertNoSecretMaterial(serialized, 'mcp_image_args');
+    return serialized;
+  } catch (error) {
+    if (/无法安全剥离/.test(error instanceof Error ? error.message : String(error))) throw error;
+    removed.push('mcp_image_args');
+    return '';
+  }
+}
+
 export function sanitizeConfigForExport(text) {
   if (!String(text || '').trim()) return { text: '', removed: [] };
   const parsed = YAML.parse(String(text));
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('config.yaml 根节点必须是对象。');
   const { value, removed } = stripSecrets(parsed);
-  return { text: YAML.stringify(value, { lineWidth: 0 }), removed };
+  if (value.mcp_image_args !== undefined && value.mcp_image_args !== null) {
+    if (typeof value.mcp_image_args === 'string') {
+      if (value.mcp_image_args.trim()) {
+        const sanitized = sanitizeMcpArgumentString(value.mcp_image_args, removed);
+        if (sanitized) value.mcp_image_args = sanitized;
+        else delete value.mcp_image_args;
+      }
+    } else {
+      value.mcp_image_args = sanitizeEmbeddedJson(value.mcp_image_args, 'mcp_image_args', removed);
+      const serialized = JSON.stringify(value.mcp_image_args);
+      assertNoSecretMaterial(serialized, 'mcp_image_args');
+    }
+  }
+  const output = YAML.stringify(value, { lineWidth: 0 });
+  assertNoSecretMaterial(output, 'config.yaml');
+  return { text: output, removed };
 }
 
 export function sanitizeYamlForExport(text, label = 'yaml') {
