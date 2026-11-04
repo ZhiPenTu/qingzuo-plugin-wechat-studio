@@ -1,6 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { AI_FINGERPRINTS, detectAiFlavor, formatReviewMarkdown, reviewArticle } from '../src/lib/review.mjs';
+import {
+  AI_FINGERPRINTS,
+  AI_REVIEW_HEADING,
+  aiReviewSupplement,
+  detectAiFlavor,
+  formatReviewMarkdown,
+  mergeReviewMarkdown,
+  reviewArticle,
+} from '../src/lib/review.mjs';
+import { buildReviewPrompt } from '../src/lib/prompts.mjs';
 
 const clean = `# 标题
 
@@ -19,6 +28,48 @@ const clean = `# 标题
 test('there are exactly fifteen AI flavor fingerprints', () => {
   assert.equal(AI_FINGERPRINTS.length, 15);
   assert.deepEqual(AI_FINGERPRINTS.map(item => item.id), Array.from({ length: 15 }, (_, index) => index + 1));
+});
+
+test('AI review prompt only supplements local findings within a bounded response', () => {
+  const prompt = buildReviewPrompt({ forbidden_words: ['绝对'] }, { title: '测试' }, '正文', {
+    localIssues: ['警告 · 配图：仍有 8 个占位符'],
+  });
+  assert.match(prompt.system, /不要重复本地已列出的问题/);
+  assert.match(prompt.system, /不超过 800 字/);
+  assert.match(prompt.system, /禁用词：绝对/);
+  assert.match(prompt.user, /警告 · 配图：仍有 8 个占位符/);
+  assert.match(prompt.user, /只补充新的实质问题/);
+});
+
+test('AI review supplements replace only the AI section', () => {
+  const local = '# 内容审稿\n\n阻断 0 · 警告 1\n\n- [警告] **配图**：仍有占位符。\n';
+  const first = mergeReviewMarkdown(local, '1. 第一条补充。');
+  assert.match(first, /仍有占位符/);
+  assert.match(first, /第一条补充/);
+  assert.equal(first.split(AI_REVIEW_HEADING).length - 1, 1);
+
+  const second = mergeReviewMarkdown(first, AI_REVIEW_HEADING + '\n\n2. 第二条补充。');
+  assert.match(second, /仍有占位符/);
+  assert.doesNotMatch(second, /第一条补充/);
+  assert.match(second, /第二条补充/);
+  assert.equal(second.split(AI_REVIEW_HEADING).length - 1, 1);
+
+  const third = mergeReviewMarkdown(local, '## 补充诊断\n\n3. 第三条补充。');
+  assert.doesNotMatch(third, /补充诊断/);
+  assert.match(third, /第三条补充/);
+
+  const fourth = mergeReviewMarkdown(local, '\n\n## AI 补充意见\n\n## 补充诊断\n\n4. 第四条补充。');
+  assert.equal(fourth.split(AI_REVIEW_HEADING).length - 1, 1);
+  assert.doesNotMatch(fourth, /补充诊断/);
+  assert.match(fourth, /第四条补充/);
+});
+
+test('recomputing local review keeps a saved AI supplement', () => {
+  const saved = mergeReviewMarkdown('# 旧本地结果\n', 'AI 旧补充');
+  const refreshed = mergeReviewMarkdown('# 新本地结果\n', aiReviewSupplement(saved));
+  assert.match(refreshed, /新本地结果/);
+  assert.doesNotMatch(refreshed, /旧本地结果/);
+  assert.match(refreshed, /AI 旧补充/);
 });
 
 test('clean article has no blocking issues', () => {

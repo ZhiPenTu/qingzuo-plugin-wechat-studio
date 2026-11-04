@@ -274,4 +274,29 @@ export function formatReviewMarkdown(review) {
     (rows.length ? rows.join('\n') : '未发现需要修改的问题。') + '\n';
 }
 
+export const AI_REVIEW_HEADING = '## AI 补充意见';
+export const AI_REVIEW_NOTE = '> 以下为 AI 补充提示，不改变上方本地统计和进入排版的门禁。';
+
+function cleanAiSupplement(value) {
+  let text = String(value || '').replace(AI_REVIEW_NOTE, '').trimStart();
+  while (/^##\s*AI 补充意见[^\n]*\n+/i.test(text)) {
+    text = text.replace(/^##\s*AI 补充意见[^\n]*\n+/i, '');
+  }
+  text = text.replace(/^#{1,6}\s+(?!阻断|警告|建议)[^\n]*\n+/i, '');
+  return text.trim();
+}
+
+export function aiReviewSupplement(markdown) {
+  const match = String(markdown || '').match(/\n*## AI 补充意见\s*\n+([\s\S]*)$/);
+  if (!match) return '';
+  return cleanAiSupplement(match[1]);
+}
+
+export function mergeReviewMarkdown(markdown, supplement) {
+  const base = String(markdown || '').replace(/\n*## AI 补充意见\s*\n[\s\S]*$/, '').trimEnd();
+  const cleaned = cleanAiSupplement(supplement);
+  if (!cleaned) return base ? base + '\n' : '';
+  return (base ? base + '\n\n' : '') + AI_REVIEW_HEADING + '\n\n' + AI_REVIEW_NOTE + '\n\n' + cleaned + '\n';
+}
+
 export { AI_FINGERPRINTS };

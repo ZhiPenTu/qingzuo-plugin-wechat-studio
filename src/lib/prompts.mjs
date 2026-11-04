@@ -106,18 +106,31 @@ export function buildWritingPrompt(config = {}, article = {}, options = {}) {
   return { system, user: task };
 }
 
-export function buildReviewPrompt(config = {}, article = {}, markdown = '') {
+export function buildReviewPrompt(config = {}, article = {}, markdown = '', options = {}) {
   const merged = mergedConfig(config, article);
+  const localIssues = Array.isArray(options.localIssues)
+    ? options.localIssues.map(item => String(item || '').trim()).filter(Boolean).slice(0, 20)
+    : [];
   return {
     system: [
-      '你是公众号内容审稿编辑。只诊断，不擅自代改。',
-      '把问题分成：阻断、警告、建议。',
-      '检查敏感词、错别字、链接、原创标注、写作规范和 AI 味 15 类指纹。',
-      'AI 味只作为建议，不阻断定稿。每条都引用原句，并给出可执行的修改方向。',
-      '写作规范：' + JSON.stringify(merged.review_required || []),
-      '禁用词：' + [...(merged.forbidden_words || []), ...(merged.custom_sensitive_words || [])].join('、'),
-    ].join('\n'),
-    user: '审阅以下文章，并按分块详细格式输出：\n\n' + String(markdown || ''),
+      '你是公众号内容审稿编辑，只做补充诊断，不代写正文。',
+      '本地已覆盖敏感词、错别字、链接、原创标注、写作规范和 AI 味；不要重复本地已列出的问题。',
+      '只补充最多 5 条最有价值的实质问题，按阻断、警告、建议分组。',
+      'AI 补充意见只作提示，不改变本地阻断统计；每条引用原句（不超过 30 字）并给出可直接执行的修改方向。',
+      '总输出不超过 800 字，不要输出推理过程。',
+      '不要输出总标题，直接从阻断、警告、建议分组开始。',
+      '重点检查事实表述、数据归属、逻辑漏洞、平台合规和标题风险。',
+      merged.review_required?.length ? '写作规范：' + JSON.stringify(merged.review_required) : '',
+      [...(merged.forbidden_words || []), ...(merged.custom_sensitive_words || [])].length
+        ? '禁用词：' + [...(merged.forbidden_words || []), ...(merged.custom_sensitive_words || [])].join('、')
+        : '',
+    ].filter(Boolean).join('\n'),
+    user: [
+      localIssues.length
+        ? '本地已发现问题：\n' + localIssues.map(item => '- ' + item).join('\n')
+        : '本地未发现规则级问题。',
+      '请审阅以下文章，只补充新的实质问题：\n\n' + String(markdown || ''),
+    ].join('\n\n'),
   };
 }
 
@@ -147,7 +160,7 @@ export function stagePrompt(stage, config, article, options = {}) {
   if (stage === 'topic' || stage === 'series') return buildTopicPrompt(config, article, options);
   if (stage === 'research') return buildResearchPrompt(config, article, options.topic);
   if (stage === 'writing') return buildWritingPrompt(config, article, options);
-  if (stage === 'review') return buildReviewPrompt(config, article, options.markdown);
+  if (stage === 'review') return buildReviewPrompt(config, article, options.markdown, options);
   if (stage === 'format') return { system: '你是排版检查员。', user: options.markdown || '' };
   if (stage === 'images') return { system: '你是图片策划。', user: JSON.stringify(options.plan || {}) };
   return { system: '', user: '' };

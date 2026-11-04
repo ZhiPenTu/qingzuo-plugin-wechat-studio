@@ -5,7 +5,7 @@ import { callWorker } from './worker-client';
 import { McpPanel } from './McpPanel';
 import { buildReviewPrompt, buildTopicPrompt, buildWritingPrompt } from '../lib/prompts.mjs';
 import { checkDraft, extractBoldOutline, stripCitations } from '../lib/writing.mjs';
-import { formatReviewMarkdown, reviewArticle } from '../lib/review.mjs';
+import { aiReviewSupplement, formatReviewMarkdown, mergeReviewMarkdown, reviewArticle } from '../lib/review.mjs';
 import {
   BODY_STYLES,
   COVER_STYLES,
@@ -313,17 +313,30 @@ function ResultEditor({ value, onChange, rows = 14, label = '生成结果' }: { 
   );
 }
 
-async function completeText(system: string, user: string, modelId: string, maxTokens: number, notify: Notify) {
+function isTimeoutError(error: unknown) {
+  return /timeout|timed out|operation was aborted|超时|AbortError/i.test(errorText(error))
+    || ['TimeoutError', 'AbortError'].includes(String((error as any)?.name || ''));
+}
+
+async function completeTextResult(system: string, user: string, modelId: string, maxTokens: number) {
   const result = await api.ai.complete({
     model: modelId || undefined,
     messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
     temperature: 0.7,
     maxTokens,
   });
-  if (result.finishReason === 'length' || result.finishReason === 'max_tokens') {
+  return {
+    content: String(result.content || ''),
+    truncated: result.finishReason === 'length' || result.finishReason === 'max_tokens',
+  };
+}
+
+async function completeText(system: string, user: string, modelId: string, maxTokens: number, notify: Notify) {
+  const result = await completeTextResult(system, user, modelId, maxTokens);
+  if (result.truncated) {
     notify('模型输出达到长度上限。可以继续生成、缩短要求，或分段补全。', 'warning');
   }
-  return String(result.content || '');
+  return result.content;
 }
 
 function TopicStage({
@@ -598,10 +611,17 @@ function ReviewStage({
   const [aiValue, setAiValue] = useState(project.files.review || '');
   const [busy, setBusy] = useState(false);
 
+  const reviewDirectory = useRef(project.directory);
+  const reviewSource = useRef(project.files.writing || project.files.format || '');
+
   function runLocal() {
-    const review = reviewArticle(project.files.writing || project.files.format, config, { title: project.article.title });
+    const source = project.files.writing || project.files.format || '';
+    const changed = reviewDirectory.current !== project.directory || reviewSource.current !== source;
+    reviewDirectory.current = project.directory;
+    reviewSource.current = source;
+    const review = reviewArticle(source, config, { title: project.article.title });
     setResult(review);
-    setAiValue(formatReviewMarkdown(review));
+    setAiValue(current => mergeReviewMarkdown(formatReviewMarkdown(review), changed ? '' : aiReviewSupplement(current)));
     return review;
   }
   useEffect(() => {
@@ -612,10 +632,28 @@ function ReviewStage({
   async function aiReview() {
     setBusy(true);
     try {
-      const prompt = buildReviewPrompt(config, project.article, project.files.writing || project.files.format);
-      setAiValue(await completeText(prompt.system, prompt.user, modelId, 5000, notify));
+      const local = result || runLocal();
+      const labels = { block: '阻断', warning: '警告', suggestion: '建议' } as Record<string, string>;
+      const rank = { block: 0, warning: 1, suggestion: 2 } as Record<string, number>;
+      const localIssues = [...(local.issues || [])]
+        .sort((left: any, right: any) => (rank[left.level] ?? 3) - (rank[right.level] ?? 3))
+        .slice(0, 20)
+        .map((item: any) => (labels[item.level] || '问题') + ' · ' + item.category + '：' + item.message);
+      const prompt = buildReviewPrompt(config, project.article, project.files.writing || project.files.format, {
+        localIssues,
+      });
+      const supplement = await completeTextResult(prompt.system, prompt.user, modelId, 2500);
+      if (supplement.truncated) {
+        notify('AI 补充意见被截断，未写入 review.md。请重试或换用更快的文本模型。', 'warning');
+        return;
+      }
+      if (!supplement.content.trim()) {
+        notify('AI 没有返回补充意见。', 'warning');
+        return;
+      }
+      setAiValue(current => mergeReviewMarkdown(current || formatReviewMarkdown(local), supplement.content));
     } catch (error) {
-      notify(errorText(error), 'danger');
+      notify(isTimeoutError(error) ? 'AI 补充审稿超时，本地检测结果已保留。可以换用更快的文本模型后重试。' : errorText(error), 'danger');
     } finally {
       setBusy(false);
     }
