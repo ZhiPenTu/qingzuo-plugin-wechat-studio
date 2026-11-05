@@ -1,5 +1,38 @@
+/** @typedef {{ path: string, name?: string, kind?: string, size?: number, mtime?: number }} PreviewEntry */
+export function parseGeneratedMapping(text) {
+  try {
+    const value = JSON.parse(String(text || '{}'));
+    return value?.generated && typeof value.generated === 'object' ? { ...value.generated } : {};
+  } catch {
+    return {};
+  }
+}
+
+export function mappingForPlan(plan, text) {
+  const mapping = parseGeneratedMapping(text);
+  if (!plan) return mapping;
+  try {
+    const saved = JSON.parse(String(text || '{}'));
+    const savedItems = Array.isArray(saved?.items) ? saved.items : [];
+    const currentItems = Array.isArray(plan.items) ? plan.items : [];
+    const keyOf = item => String(item?.slotIndex ?? '') + '\n' + String(item?.alt ?? '');
+    const savedBySlot = new Map();
+    for (const item of savedItems) {
+      const relative = mapping[item?.index];
+      if (relative) savedBySlot.set(keyOf(item), relative);
+    }
+    const transferred = {};
+    for (const item of currentItems) {
+      const relative = savedBySlot.get(keyOf(item));
+      if (relative) transferred[item.index] = relative;
+    }
+    return transferred;
+  } catch {
+    return {};
+  }
+}
+
 /**
- * @typedef {{ path: string, name?: string, kind?: string, size?: number, mtime?: number }} PreviewEntry
  * @param {{
  *   directory?: string,
  *   article?: Record<string, any>,

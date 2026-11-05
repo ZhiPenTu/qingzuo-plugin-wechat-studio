@@ -23,7 +23,7 @@ import {
 } from '../lib/images.mjs';
 import { compressBodyImageBytes, cropImageBytes, base64Bytes, bytesBase64 } from '../lib/crop.mjs';
 import { imageModelLabel, imageModelSource } from '../lib/image-models.mjs';
-import { projectImagePreviews } from '../lib/image-previews.mjs';
+import { mappingForPlan, parseGeneratedMapping, projectImagePreviews } from '../lib/image-previews.mjs';
 import { generateImagesThroughMcp, mcpBatchToken, mcpCoverSize } from '../lib/mcp-images.mjs';
 import {
   appendLog,
@@ -47,6 +47,12 @@ import type { StudioPreferences } from './preferences';
 
 type Notify = (text: string, tone?: Toast['tone']) => void;
 type PreviewImage = { path: string; title: string; kind: 'cover' | 'body' };
+type ImageTarget = { kind: 'cover' } | { kind: 'body'; index: number };
+type ImageTargetStatus = { state: string; error?: string | null; taskId?: string | null };
+
+function imageTargetKey(target: ImageTarget) {
+  return target.kind === 'cover' ? 'cover' : 'body:' + target.index;
+}
 
 const STAGE_LABELS: Record<string, string> = {
   topic: '选题', research: '调研', writing: '写稿', review: '内容审',
@@ -904,14 +910,26 @@ function ImagesStage({
   const [planning, setPlanning] = useState(true);
   const [batchPath, setBatchPath] = useState('');
   const [previews, setPreviews] = useState<PreviewImage[]>([]);
+  const [statuses, setStatuses] = useState<Record<string, ImageTargetStatus>>({});
+  const [generatingKey, setGeneratingKey] = useState('');
   const [preview, setPreview] = useState<(PreviewImage & { url: string }) | null>(null);
   const mcpAbort = useRef<AbortController | null>(null);
+  const generatedMapping = useRef<Record<number, string>>({});
   const syncedCoverImageStyle = useRef(initialCoverImageStyle);
   const syncedMedium = useRef(initialMedium);
   const imageSource = String(project.article.image_source || config.image_source || 'generated');
   const imageGenerator = config.image_generator === 'mcp' ? 'mcp' : 'model';
   const mcpServer = servers.find(server => server.id === config.mcp_image_server);
   const mcpReady = Boolean(mcpServer && mcpServer.status === 'ready');
+  const promptTargets = useMemo<ImageTarget[]>(() => {
+    if (!plan) return [];
+    const targets: ImageTarget[] = [];
+    if (plan.cover?.generate) targets.push({ kind: 'cover' });
+    for (const item of plan.items || []) {
+      if (item.generate) targets.push({ kind: 'body', index: item.index });
+    }
+    return targets;
+  }, [plan]);
 
   useEffect(() => () => mcpAbort.current?.abort(), []);
 
@@ -934,8 +952,10 @@ function ImagesStage({
   }, [imageModels, modelId]);
 
   useEffect(() => {
-    setPreviews(projectImagePreviews(project));
-  }, [project.directory, project.files.imagePlan, project.article.cover_image, project.entries]);
+    const mapping = plan ? mappingForPlan(plan, project.files.imagePlan) : parseGeneratedMapping(project.files.imagePlan);
+    generatedMapping.current = mapping;
+    setPreviews(plan ? previewsFromMapping(mapping) : projectImagePreviews(project));
+  }, [plan, project.directory, project.files.imagePlan, project.article.cover_image, project.entries]);
 
   useEffect(() => {
     let cancelled = false;
@@ -960,10 +980,13 @@ function ImagesStage({
     };
   }, [baseMarkdown, config, project.article, coverImageStyle, medium, notify]);
 
-  async function waitBatch(id: string) {
+  async function waitBatch(id: string, updateState = true) {
     for (let index = 0; index < 600; index += 1) {
       const value = await api.ai.batch.get({ id });
-      setBatch(value);
+      if (updateState) {
+        setBatch(value);
+        setStatuses(statusMapFromBatch(value));
+      }
       if (['finished', 'interrupted', 'canceled'].includes(value.state)) return value;
       await new Promise(resolve => setTimeout(resolve, 1000));
     }
@@ -995,11 +1018,145 @@ function ImagesStage({
     return previews;
   }
 
+  function statusMapFromBatch(value: any): Record<string, ImageTargetStatus> {
+    const next: Record<string, ImageTargetStatus> = {};
+    promptTargets.forEach((target, index) => {
+      const item = value?.items?.[index];
+      if (!item) return;
+      next[imageTargetKey(target)] = {
+        state: String(item.state || ''),
+        error: item.error || null,
+        taskId: item.taskId || null,
+      };
+    });
+    return next;
+  }
+
+  function updateBatchTarget(target: ImageTarget, state: string, error: string | null = null) {
+    const key = imageTargetKey(target);
+    const position = promptTargets.findIndex(item => imageTargetKey(item) === key);
+    if (position < 0) return;
+    setBatch((current: any) => {
+      if (!current?.items?.[position]) return current;
+      return {
+        ...current,
+        items: current.items.map((item: any, index: number) => index === position ? { ...item, state, error } : item),
+      };
+    });
+  }
+
+  function targetPrompt(target: ImageTarget) {
+    if (!plan) return '';
+    if (target.kind === 'cover') return String(plan.cover?.prompt || '');
+    return String(plan.items.find((item: any) => item.index === target.index)?.prompt || '');
+  }
+
+  function targetLabel(target: ImageTarget) {
+    if (target.kind === 'cover') return '封面';
+    const position = (plan?.items || []).findIndex((item: any) => item.index === target.index);
+    return '配图 ' + (position + 1);
+  }
+
+  function previewForTarget(target: ImageTarget) {
+    if (target.kind === 'cover') return previews.find(image => image.kind === 'cover') || null;
+    const title = targetLabel(target);
+    return previews.find(image => image.kind === 'body' && image.title === title) || null;
+  }
+
+  async function applySingleImage(target: ImageTarget, sourcePath: string) {
+    if (!plan) throw new Error('配图方案尚未加载。');
+    const token = shortId(String(Date.now()));
+    const previousMapping = { ...generatedMapping.current };
+    const mapping = { ...previousMapping };
+    const createdFiles: string[] = [];
+    let coverPath = '';
+    let cover235Path = '';
+    let cover11Path = '';
+    const previousMarkdown = await readOptional(project.directory + '/article.md');
+    const previousHtml = await readOptional(project.directory + '/article.html');
+    const previousPlan = await readOptional(project.directory + '/img-plan.json');
+    const previousArticle = await readOptional(project.directory + '/article.yaml');
+    const previousBatchId = (() => {
+      try {
+        return JSON.parse(previousPlan || '{}')?.batchId || null;
+      } catch {
+        return null;
+      }
+    })();
+    try {
+      const sourceFile = await api.workspace.readFile({ path: sourcePath });
+      const sourceBytes = base64Bytes(sourceFile.data);
+      if (target.kind === 'cover') {
+        const coverAspect = String(config.cover_aspect || '2.35:1');
+        const cover = await cropImageBytes(sourceBytes, sourceFile.mime, coverAspect, 0.9);
+        const cover235 = await cropImageBytes(sourceBytes, sourceFile.mime, '2.35:1', 0.9);
+        const cover11 = await cropImageBytes(sourceBytes, sourceFile.mime, '1:1', 0.9);
+        coverPath = project.directory + '/cover-' + token + '.jpg';
+        cover235Path = project.directory + '/cover-235-' + token + '.jpg';
+        cover11Path = project.directory + '/cover-11-' + token + '.jpg';
+        await api.workspace.writeBase64({ path: coverPath, data: bytesBase64(cover), mime: 'image/jpeg', overwrite: false });
+        createdFiles.push(coverPath);
+        await api.workspace.writeBase64({ path: cover235Path, data: bytesBase64(cover235), mime: 'image/jpeg', overwrite: false });
+        createdFiles.push(cover235Path);
+        await api.workspace.writeBase64({ path: cover11Path, data: bytesBase64(cover11), mime: 'image/jpeg', overwrite: false });
+        createdFiles.push(cover11Path);
+      } else {
+        const compressed = await compressBodyImageBytes(sourceBytes, sourceFile.mime);
+        const targetPath = project.directory + '/imgs/body-' + String(target.index + 1).padStart(2, '0') + '-' + token + '.jpg';
+        await api.workspace.writeBase64({ path: targetPath, data: bytesBase64(compressed), mime: 'image/jpeg', overwrite: false });
+        createdFiles.push(targetPath);
+        mapping[target.index] = targetPath.slice(project.directory.length + 1);
+      }
+      const rewritten = rewriteImageMarkersWithMapping(baseMarkdown, plan, mapping);
+      const rendered = await callWorker<any>('render', {
+        markdown: rewritten,
+        theme: project.article.default_format_preset?.[0] || config.custom_format_preset?.[0] || config.default_format_preset?.[0] || '亲和',
+        scheme: project.article.default_format_scheme?.[0] || config.custom_format_scheme?.[0] || config.default_format_scheme?.[0] || '',
+        embeds: config.embeds || {},
+        captionStyle: config.caption_style || '有图注',
+      });
+      await api.workspace.writeText({ path: project.directory + '/article.md', text: rewritten, overwrite: true });
+      await api.workspace.writeText({ path: project.directory + '/article.html', text: rendered.html, overwrite: true });
+      await api.workspace.writeText({
+        path: project.directory + '/img-plan.json',
+        text: JSON.stringify({ ...plan, generated: mapping, batchId: previousBatchId }, null, 2),
+        overwrite: true,
+      });
+      await saveArticle(api, project.directory, {
+        ...(coverPath ? {
+          cover_image: coverPath.slice(project.directory.length + 1),
+          pic_crop_235_1: cover235Path.slice(project.directory.length + 1),
+          pic_crop_1_1: cover11Path.slice(project.directory.length + 1),
+        } : {}),
+        image_medium: plan.medium,
+        cover_image_style: plan.cover.style,
+      });
+    } catch (error) {
+      if (previousMarkdown) await api.workspace.writeText({ path: project.directory + '/article.md', text: previousMarkdown, overwrite: true }).catch(() => {});
+      else await api.workspace.remove({ path: project.directory + '/article.md' }).catch(() => {});
+      if (previousHtml) await api.workspace.writeText({ path: project.directory + '/article.html', text: previousHtml, overwrite: true }).catch(() => {});
+      else await api.workspace.remove({ path: project.directory + '/article.html' }).catch(() => {});
+      if (previousPlan) await api.workspace.writeText({ path: project.directory + '/img-plan.json', text: previousPlan, overwrite: true }).catch(() => {});
+      else await api.workspace.remove({ path: project.directory + '/img-plan.json' }).catch(() => {});
+      if (previousArticle) await api.workspace.writeText({ path: project.directory + '/article.yaml', text: previousArticle, overwrite: true }).catch(() => {});
+      else await api.workspace.remove({ path: project.directory + '/article.yaml' }).catch(() => {});
+      for (const path of createdFiles.reverse()) await api.workspace.remove({ path }).catch(() => {});
+      throw error;
+    }
+
+    generatedMapping.current = mapping;
+    const nextPreviews = previewsFromMapping(mapping, coverPath || project.article.cover_image);
+    setPreviews(nextPreviews);
+    await onReload().catch(() => {});
+    return nextPreviews;
+  }
+
   async function generate(action: 'new' | 'retry' = 'new') {
     if (!plan || (imageGenerator !== 'mcp' && !modelId)) {
       notify(imageGenerator === 'mcp' ? '请先完成 MCP 生图配置。' : '请选择图片模型。', 'warning');
       return;
     }
+    setStatuses({});
     if (imageGenerator === 'mcp') {
       if (!config.mcp_image_server || !config.mcp_image_tool || !mcpReady) {
         notify('请先在配置中心选择当前可用的 MCP 服务和生图工具。', 'warning');
@@ -1054,6 +1211,7 @@ function ImagesStage({
           })),
         };
         setBatch(value);
+        setStatuses(statusMapFromBatch(value));
         const hasRecovery = producedFiles > 0 || result.unknowns.length > 0 || Boolean(result.abortedTaskId);
         if (result.fatal) {
           const note = (producedFiles
@@ -1151,6 +1309,7 @@ function ImagesStage({
         });
       }
       setBatch(value);
+      setStatuses(statusMapFromBatch(value));
       if (value.workspacePath) setBatchPath(value.workspacePath);
       setMessage('正在生成 ' + value.items.length + ' 张图片。失败或未知状态不会自动重发。');
       value = await waitBatch(value.id);
@@ -1178,6 +1337,163 @@ function ImagesStage({
       setMessage(errorText(error));
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function generateSingle(target: ImageTarget) {
+    if (!plan || busy) return;
+    if (imageGenerator !== 'mcp' && !modelId) {
+      notify('请选择图片模型。', 'warning');
+      return;
+    }
+    if (imageGenerator === 'mcp' && (!config.mcp_image_server || !config.mcp_image_tool || !mcpReady)) {
+      notify('请先在配置中心选择当前可用的 MCP 服务和生图工具。', 'warning');
+      return;
+    }
+    const prompt = targetPrompt(target);
+    if (!prompt) {
+      notify('这个图位没有可用的生成提示词。', 'warning');
+      return;
+    }
+    const key = imageTargetKey(target);
+    const label = targetLabel(target);
+    const controller = new AbortController();
+    let outputPath = '';
+    let keepOutput = false;
+    let unknown = false;
+    let submitted = false;
+    let confirmedFailure = false;
+    let sourceReady = false;
+    let failureState = '';
+    setBusy(true);
+    setGeneratingKey(key);
+    setStatuses(current => ({ ...current, [key]: { state: 'running', error: null } }));
+    setMessage('正在生成' + label + '…');
+    try {
+      let sourcePath = '';
+      if (imageGenerator === 'mcp') {
+        outputPath = project.directory + '/imgs/batches/mcp-' + mcpBatchToken();
+        mcpAbort.current = controller;
+        setMcpWaiting(true);
+        submitted = true;
+        const result = await generateImagesThroughMcp({
+          api,
+          serverId: config.mcp_image_server,
+          toolName: config.mcp_image_tool,
+          argsTemplate: config.mcp_image_args,
+          prompts: [prompt],
+          directory: outputPath,
+          sizeFor: () => target.kind === 'cover' ? mcpCoverSize(plan.cover?.aspect || config.cover_aspect) : '16:9',
+          signal: controller.signal,
+        });
+        if (result.fatal) {
+          confirmedFailure = true;
+          throw new Error(result.fatal);
+        }
+        if (result.files.length) {
+          sourcePath = result.files[0].path;
+          sourceReady = true;
+        } else if (result.unknowns.length || result.abortedTaskId) {
+          unknown = true;
+          keepOutput = true;
+          const taskId = result.unknowns[0]?.taskId || result.abortedTaskId || '';
+          const note = label + '结果未知，不会自动重发。' + (taskId ? '任务 ID：' + taskId + '。' : '')
+            + '请先检查 MCP 服务端，再在这里单独重新生成。记录：' + outputPath + '/mcp-generation.json';
+          setStatuses(current => ({ ...current, [key]: { state: 'unknown', error: note, taskId } }));
+          updateBatchTarget(target, 'unknown', note);
+          setMessage(note);
+          notify(note, 'warning');
+          return;
+        } else if (result.aborted) {
+          const note = '已停止等待' + label + '生成；任务可能仍在 MCP 服务端进行。';
+          setStatuses(current => ({ ...current, [key]: { state: 'canceled', error: note } }));
+          setMessage(note);
+          notify(note, 'warning');
+          keepOutput = true;
+          return;
+        } else {
+          confirmedFailure = true;
+          failureState = 'failed';
+          throw new Error(result.failures[0]?.error || 'MCP 没有生成可用图片。');
+        }
+      } else {
+        const created = await api.ai.batch.create({
+          mode: 'generate',
+          source: imageModelSource(imageModels, modelId),
+          modelId,
+          prompt,
+          items: [{ prompt }],
+          concurrency: 1,
+        });
+        outputPath = project.directory + '/imgs/batches/' + created.id;
+        await api.workspace.mkdir({ path: outputPath });
+        submitted = true;
+        let value = await api.ai.batch.start({
+          id: created.id,
+          revision: created.revision,
+          workspacePath: outputPath,
+        });
+        value = await waitBatch(value.id, false);
+        const item = value.items?.[0];
+        if (item?.state === 'unknown') {
+          unknown = true;
+          keepOutput = true;
+          const note = label + '结果未知，不会自动重发。请先检查宿主后台任务，再单独重新生成。'
+            + (item.error ? ' ' + item.error : '');
+          setStatuses(current => ({ ...current, [key]: { state: 'unknown', error: note } }));
+          updateBatchTarget(target, 'unknown', note);
+          setMessage(note);
+          notify(note, 'warning');
+          return;
+        }
+        if (item && ['failed', 'save-failed'].includes(item.state)) {
+          confirmedFailure = true;
+          failureState = 'failed';
+          throw new Error(item.error || label + '生成失败。');
+        }
+        if (item?.state !== 'succeeded') {
+          confirmedFailure = true;
+          failureState = value.state === 'interrupted' || value.state === 'canceled' ? value.state : 'failed';
+          throw new Error(value.state === 'interrupted'
+            ? '生成被中断，未写入这张图片。'
+            : value.state === 'canceled'
+              ? '生成已取消，未写入这张图片。'
+              : '生成没有成功完成。');
+        }
+        const entries = await api.workspace.list({ path: outputPath, recursive: false });
+        const generated = mapGeneratedFiles({ prompts: [prompt] }, entries);
+        if (!generated.length) throw new Error('没有找到生成的图片文件。');
+        sourcePath = generated[0].path;
+        sourceReady = true;
+      }
+      await applySingleImage(target, sourcePath);
+      setStatuses(current => ({ ...current, [key]: { state: 'succeeded', error: null, taskId: null } }));
+      setBatch(null);
+      setBatchPath('');
+      setMessage(label + '已单独更新，其他图片保持不变。');
+      notify(label + '已单独更新。请检查中文和信息位内容。', 'success');
+    } catch (error) {
+      const reason = errorText(error);
+      if (submitted && !confirmedFailure && !sourceReady) {
+        unknown = true;
+        keepOutput = true;
+      } else if (sourceReady) {
+        keepOutput = true;
+      }
+      const state = unknown ? 'unknown' : sourceReady ? 'save-failed' : (failureState || 'failed');
+      const note = reason + (sourceReady && outputPath ? ' 已生成的源图保留在 ' + outputPath + '。' : '');
+      setStatuses(current => ({ ...current, [key]: { state, error: note } }));
+      if (unknown) updateBatchTarget(target, 'unknown', note);
+      setMessage(note);
+      notify(note, unknown || state === 'save-failed' ? 'warning' : 'danger');
+    } finally {
+      mcpAbort.current = null;
+      setMcpWaiting(false);
+      setBusy(false);
+      setGeneratingKey('');
+      if (outputPath && !keepOutput) {
+        await api.workspace.remove({ path: outputPath, recursive: true }).catch(() => {});
+      }
     }
   }
 
@@ -1270,6 +1586,7 @@ function ImagesStage({
         text: JSON.stringify({ ...plan, generated: mapping, source: 'user', batchId: null }, null, 2),
         overwrite: true,
       });
+      generatedMapping.current = mapping;
       setPreviews(previewsFromMapping(mapping));
       await onReload().catch(() => {});
       const missing = Math.max(0, plan.items.length - Object.keys(mapping).length);
@@ -1367,6 +1684,7 @@ function ImagesStage({
       throw error;
     }
     const missing = (coverEntry ? 0 : 1) + generatedItems.filter((item: any) => !mapping[item.index]).length;
+    generatedMapping.current = mapping;
     await onReload().catch(() => {});
     setPreviews(previewsFromMapping(mapping, coverPath));
     setMessage('图片已写入文章目录并更新正文。');
@@ -1375,6 +1693,7 @@ function ImagesStage({
 
   const retryable = batch?.items?.filter((item: any) => ['failed', 'save-failed'].includes(item.state)) || [];
   const unknown = batch?.items?.filter((item: any) => item.state === 'unknown') || [];
+  const unknownCount = Object.values(statuses).filter(item => item.state === 'unknown').length || unknown.length;
   const pendingSlots = (plan?.items || []).filter((item: any) => /^placeholder(?:-|$)/i.test(String(item.src || '')));
 
   async function saveSelection() {
@@ -1398,6 +1717,12 @@ function ImagesStage({
     if (next) onNext();
     else onSaved();
   }
+
+  const coverTarget: ImageTarget = { kind: 'cover' };
+  const coverPreview = previewForTarget(coverTarget);
+  const coverHasMedia = Boolean(plan?.cover?.generate || coverPreview) || imageSource === 'user';
+  const singleDisabled = !plan || planning || busy
+    || (imageGenerator === 'model' ? !modelId : (!mcpReady || !config.mcp_image_tool));
 
   return (
     <div>
@@ -1431,62 +1756,89 @@ function ImagesStage({
       {plan ? (
         <>
           <div className="image-plan">
-            <article className="plan-card cover-plan">
-              <Badge tone="accent">封面</Badge>
-              <strong>{plan.cover.style}</strong>
-              <p>文案：{plan.cover.copy} · {plan.cover.aspect}</p>
-              <details><summary>提示词</summary><pre>{plan.cover.prompt}</pre></details>
+            <article className={'plan-card cover-plan' + (coverHasMedia ? ' has-media' : '')}>
+              <div className="plan-card-body">
+                <Badge tone="accent">封面</Badge>
+                <strong>{plan.cover.style}</strong>
+                <p>文案：{plan.cover.copy} · {plan.cover.aspect}</p>
+                <details><summary>提示词</summary><pre>{plan.cover.prompt}</pre></details>
+              </div>
+              {coverHasMedia ? (
+                <div className="plan-card-media">
+                  <TargetStatusBadge status={statuses[imageTargetKey(coverTarget)]} hasImage={Boolean(coverPreview)} generated={Boolean(plan.cover.generate)} />
+                  <PlanThumb image={coverPreview} onOpen={openPreview} />
+                  {plan.cover.generate ? (
+                    <Button
+                      type="button"
+                      variant={coverPreview ? 'secondary' : 'primary'}
+                      busy={generatingKey === imageTargetKey(coverTarget)}
+                      disabled={singleDisabled}
+                      aria-label={(coverPreview ? '重新生成封面' : '生成封面')}
+                      onClick={() => void generateSingle(coverTarget)}
+                    >
+                      {coverPreview ? '重新生成' : '生成'}
+                    </Button>
+                  ) : coverPreview ? <small className="plan-card-source-note">你提供的封面</small> : null}
+                  <TargetError status={statuses[imageTargetKey(coverTarget)]} />
+                </div>
+              ) : null}
             </article>
-            {plan.items.map((item: any) => (
-              <article
-                className={'plan-card' + (/^placeholder(?:-|$)/i.test(String(item.src || '')) ? ' plan-card-pending' : '')}
-                key={item.index}
-              >
-                <span className="plan-card-top">
-                  <Badge tone={item.role === '信息位' ? 'warning' : 'neutral'}>{item.role}</Badge>
-                  <Badge tone="neutral">{item.style}</Badge>
-                  {/^placeholder(?:-|$)/i.test(String(item.src || '')) ? <Badge tone="warning">待补图</Badge> : null}
-                </span>
-                <strong>{item.alt}</strong>
-                <p>{item.generate ? '将生成' : '需要你提供真实截图或照片'}</p>
-                <details><summary>提示词</summary><pre>{item.prompt}</pre></details>
-              </article>
-            ))}
+            {plan.items.map((item: any) => {
+              const target: ImageTarget = { kind: 'body', index: item.index };
+              const key = imageTargetKey(target);
+              const image = previewForTarget(target);
+              const hasMedia = Boolean(item.generate || image) || imageSource === 'user';
+              return (
+                <article
+                  className={'plan-card'
+                    + (hasMedia ? ' has-media' : '')
+                    + (/^placeholder(?:-|$)/i.test(String(item.src || '')) ? ' plan-card-pending' : '')}
+                  key={item.index}
+                >
+                  <div className="plan-card-body">
+                    <span className="plan-card-top">
+                      <Badge tone={item.role === '信息位' ? 'warning' : 'neutral'}>{item.role}</Badge>
+                      <Badge tone="neutral">{item.style}</Badge>
+                      {/^placeholder(?:-|$)/i.test(String(item.src || '')) ? <Badge tone="warning">待补图</Badge> : null}
+                    </span>
+                    <strong>{item.alt}</strong>
+                    <p>{item.generate ? (image ? '已生成，可单独重做' : '将生成') : (image ? '已导入你提供的图片' : '需要你提供真实截图或照片')}</p>
+                    <details><summary>提示词</summary><pre>{item.prompt}</pre></details>
+                  </div>
+                  {hasMedia ? (
+                    <div className="plan-card-media">
+                      <TargetStatusBadge status={statuses[key]} hasImage={Boolean(image)} generated={Boolean(item.generate)} />
+                      <PlanThumb image={image} onOpen={openPreview} />
+                      {item.generate ? (
+                        <Button
+                          type="button"
+                          variant={image ? 'secondary' : 'primary'}
+                          busy={generatingKey === key}
+                          disabled={singleDisabled}
+                          aria-label={(image ? '重新生成' : '生成') + targetLabel(target)}
+                          onClick={() => void generateSingle(target)}
+                        >
+                          {image ? '重新生成' : '生成'}
+                        </Button>
+                      ) : image ? <small className="plan-card-source-note">你提供的图片</small> : null}
+                      <TargetError status={statuses[key]} />
+                    </div>
+                  ) : null}
+                </article>
+              );
+            })}
           </div>
           {plan.warnings.length ? <div className="notice warning">{plan.warnings.map((item: string) => <p key={item}>{item}</p>)}</div> : null}
           {pendingSlots.length ? (
             <div className="notice warning">
               <p>还有 {pendingSlots.length} 个正文图位没有图片，进入终审后会被标记为未通过：</p>
               <ul>{pendingSlots.map((item: any) => <li key={item.index}>{item.alt}</li>)}</ul>
-              <p>可以重新生成图片，或到排版阶段删除不需要的图位。</p>
+              <p>可以在对应卡片单独生成，或到排版阶段删除不需要的图位。</p>
             </div>
           ) : null}
         </>
       ) : <div className="loading-inline"><span className="spinner" /> 正在规划图片…</div>}
       {message ? <div className="notice info">{message}</div> : null}
-      {previews.length ? (
-        <section className="generated-previews">
-          <div className="generated-preview-head">
-            <strong>已生成图片</strong>
-            <span>点击可查看大图</span>
-          </div>
-          <div className="generated-preview-grid">
-            {previews.map(image => <GeneratedPreview key={image.path} image={image} onOpen={openPreview} />)}
-          </div>
-        </section>
-      ) : null}
-      {batch?.items?.length ? (
-        <div className="batch-list">
-          {batch.items.map((item: any, index: number) => (
-            <div key={item.id}>
-              <span>{index + 1}</span>
-              <strong>{item.name}</strong>
-              <Badge tone={item.state === 'succeeded' ? 'success' : item.state === 'failed' || item.state === 'unknown' ? 'danger' : item.state === 'running' ? 'accent' : 'neutral'}>{batchState(item.state)}</Badge>
-              {item.error ? <small>{item.error}{item.taskId ? ' · 任务 ID：' + item.taskId : ''}</small> : null}
-            </div>
-          ))}
-        </div>
-      ) : null}
       <div className="toolbar toolbar-end">
         {imageSource === 'user' ? (
           <>
@@ -1504,14 +1856,14 @@ function ImagesStage({
               busy={busy}
               disabled={!plan || planning || (imageGenerator === 'model' ? !modelId : (!mcpReady || !config.mcp_image_tool)) || batch?.state === 'running' || batch?.state === 'canceling'}
             >
-              {batch ? (imageGenerator === 'mcp' ? '重新生成全部图片（会再次调用成功项）' : '重新生成全部图片') : '生成封面与正文配图'}
+              {batch || previews.length ? (imageGenerator === 'mcp' ? '重新生成全部图片（会再次调用成功项）' : '重新生成全部图片') : '生成封面与正文配图'}
             </Button>
           </>
         )}
       </div>
       {imageSource === 'user' ? <div className="notice info">本篇使用你提供的图片，不会调用生图模型。封面先导入一张，正文图片按图位顺序批量导入。</div> : null}
-      {unknown.length ? <div className="notice warning">有 {unknown.length} 张图结果未知，不会自动重发。批次目录的 mcp-generation.json 已记录任务 ID，请先检查后台，确认后再选择“重新生成全部图片”。</div> : null}
-      {imageGenerator === 'mcp' && batch?.items?.some((item: any) => ['failed', 'save-failed'].includes(item.state)) ? <div className="notice warning">MCP 模式暂不支持只重试失败项；重新生成会再次调用已成功项并可能重复计费。</div> : null}
+      {imageSource !== 'user' ? <div className="notice info">每张卡片都可以单独生成或重做，只调用该图，不会重发其他成功项。</div> : null}
+      {unknownCount ? <div className="notice warning">有 {unknownCount} 张图结果未知，不会自动重发。请先检查宿主后台任务（MCP 模式的记录在批次目录 mcp-generation.json），再在对应卡片单独生成。</div> : null}
       <div className="toolbar toolbar-end">
         <Button type="button" onClick={() => void saveAndContinue(false)} disabled={busy}>仅保存状态</Button>
         <Button type="button" variant="primary" onClick={() => void saveAndContinue(true)} disabled={busy}>确认配图，进入终审</Button>
@@ -1525,28 +1877,69 @@ function ImagesStage({
   );
 }
 
-function GeneratedPreview({ image, onOpen }: { image: PreviewImage; onOpen: (image: PreviewImage) => void }) {
+function PlanThumb({ image, onOpen }: { image: PreviewImage | null; onOpen: (image: PreviewImage) => void }) {
   const [url, setUrl] = useState('');
   useEffect(() => {
-    void api.workspace.url({ path: image.path }).then(setUrl).catch(() => {});
-  }, [image.path]);
+    let cancelled = false;
+    if (!image) {
+      setUrl('');
+      return () => {
+        cancelled = true;
+      };
+    }
+    void api.workspace.url({ path: image.path }).then((value: string) => {
+      if (!cancelled) setUrl(String(value));
+    }).catch(() => {
+      if (!cancelled) setUrl('');
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [image?.path]);
+  if (!image) {
+    return <div className="plan-thumb-empty" aria-label="还没有生成图片">图</div>;
+  }
   return (
     <button
       type="button"
-      className={'generated-preview-card' + (image.kind === 'cover' ? ' cover' : '')}
+      className="plan-thumb"
       onClick={() => onOpen(image)}
       title="点击查看大图"
+      aria-label={'查看' + image.title + '大图'}
     >
       {url ? <img src={url} alt={image.title} loading="lazy" /> : <span className="image-placeholder" />}
-      <span>{image.title}</span>
     </button>
+  );
+}
+
+function TargetStatusBadge({ status, hasImage, generated = true }: { status?: ImageTargetStatus; hasImage: boolean; generated?: boolean }) {
+  if (!generated) return <Badge tone={hasImage ? 'success' : 'neutral'}>{hasImage ? '已导入' : '待导入'}</Badge>;
+  const state = status?.state || (hasImage ? 'succeeded' : '');
+  if (!state) return <Badge tone="neutral">待生成</Badge>;
+  const tone = state === 'succeeded'
+    ? 'success'
+    : ['failed', 'save-failed', 'unknown'].includes(state)
+      ? 'danger'
+      : state === 'running'
+        ? 'accent'
+        : 'neutral';
+  return <Badge tone={tone}>{batchState(state)}</Badge>;
+}
+
+function TargetError({ status }: { status?: ImageTargetStatus }) {
+  if (!status?.error || status.state === 'succeeded') return null;
+  return (
+    <small className="plan-card-error" title={status.error}>
+      {status.error}{status.taskId ? ' · 任务 ID：' + status.taskId : ''}
+    </small>
   );
 }
 
 function batchState(state: string) {
   return {
-    pending: '等待', running: '生成中', succeeded: '完成', failed: '失败',
+    pending: '等待', running: '生成中', succeeded: '已生成', failed: '生成失败',
     'save-failed': '保存失败', unknown: '结果未知', interrupted: '已中断',
+    canceled: '已停止',
   }[state] || state;
 }
 

@@ -1,6 +1,40 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { projectImagePreviews } from '../src/lib/image-previews.mjs';
+import { mappingForPlan, projectImagePreviews } from '../src/lib/image-previews.mjs';
+
+test('generated mapping follows slot identity instead of array position', () => {
+  const saved = JSON.stringify({
+    items: [
+      { index: 0, slotIndex: 3, alt: '信息图：甲' },
+      { index: 1, slotIndex: 7, alt: '氛围：乙' },
+    ],
+    generated: { 0: 'imgs/body-01-a.jpg', 1: 'imgs/body-02-b.jpg' },
+  });
+  const reordered = {
+    items: [
+      { index: 0, slotIndex: 7, alt: '氛围：乙' },
+      { index: 1, slotIndex: 3, alt: '信息图：甲' },
+    ],
+  };
+  assert.deepEqual(mappingForPlan(reordered, saved), {
+    0: 'imgs/body-02-b.jpg',
+    1: 'imgs/body-01-a.jpg',
+  });
+  const changed = {
+    items: [
+      { index: 0, slotIndex: 7, alt: '氛围：乙' },
+      { index: 1, slotIndex: 3, alt: '信息图：改写后的甲' },
+    ],
+  };
+  assert.deepEqual(mappingForPlan(changed, saved), { 0: 'imgs/body-02-b.jpg' });
+});
+
+test('generated mapping is ignored when the saved plan is invalid', () => {
+  assert.deepEqual(mappingForPlan({ items: [{ index: 0, slotIndex: 1, alt: '甲' }] }, 'not json'), {});
+  assert.deepEqual(mappingForPlan(null, JSON.stringify({ generated: { 0: 'imgs/body-01-a.jpg' } })), {
+    0: 'imgs/body-01-a.jpg',
+  });
+});
 
 test('project previews include the saved cover and mapped body images', () => {
   const previews = projectImagePreviews({
