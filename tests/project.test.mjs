@@ -18,7 +18,7 @@ import {
 function memoryApi() {
   const files = new Map();
   const directories = new Set(['drafts']);
-  const state = { failRemove: '' };
+  const state = { failRemove: '', partialRemove: '' };
   const workspace = {
     async mkdir({ path }) {
       const parts = path.split('/');
@@ -76,6 +76,11 @@ function memoryApi() {
       if (state.failRemove && path.startsWith(state.failRemove)) throw new Error('模拟删除失败。');
       const children = [...directories].filter(directory => directory.startsWith(path + '/'));
       if (children.length && !recursive) throw new Error('目录不为空。');
+      if (state.partialRemove && path.startsWith(state.partialRemove)) {
+        const file = [...files.keys()].find(value => value.startsWith(path + '/'));
+        if (file) files.delete(file);
+        throw new Error('模拟部分删除失败。');
+      }
       for (const directory of children) directories.delete(directory);
       for (const file of [...files.keys()]) {
         if (file === path || file.startsWith(path + '/')) files.delete(file);
@@ -185,18 +190,32 @@ test('custom image copies persist across reloads and clean up on reset', async (
   assert.deepEqual(reloaded.article.body_copies, {});
 });
 
-test('project deletion is scoped and rolls back when remove fails', async () => {
-  const { api, directories, state } = memoryApi();
+test('project deletion is scoped and keeps cleanup failures in trash', async () => {
+  const { api, directories, files, state } = memoryApi();
   directories.add('drafts/20261103-delete');
-  await deleteProjectDirectory(api, 'drafts/20261103-delete');
+  const deleted = await deleteProjectDirectory(api, 'drafts/20261103-delete');
+  assert.equal(deleted.cleaned, true);
   assert.equal(directories.has('drafts/20261103-delete'), false);
   await assert.rejects(() => deleteProjectDirectory(api, 'posts/not-a-draft'), /drafts/);
 
   directories.add('drafts/20261103-restore');
-  state.failRemove = 'drafts/.deleting-';
-  await assert.rejects(() => deleteProjectDirectory(api, 'drafts/20261103-restore'), /模拟删除失败/);
-  assert.equal(directories.has('drafts/20261103-restore'), true);
-  assert.equal([...directories].some(path => path.includes('.deleting-')), false);
+  state.failRemove = 'drafts/.trash/';
+  const uncleaned = await deleteProjectDirectory(api, 'drafts/20261103-restore');
+  assert.equal(uncleaned.cleaned, false);
+  assert.equal(directories.has('drafts/20261103-restore'), false);
+  assert.match(uncleaned.trashPath, /^drafts\/\.trash\//);
+  assert.equal(directories.has(uncleaned.trashPath), true);
+
+  const partial = 'drafts/20261103-partial';
+  directories.add(partial);
+  files.set(partial + '/article.md', '# Draft');
+  state.failRemove = '';
+  state.partialRemove = 'drafts/.trash/';
+  const partiallyRemoved = await deleteProjectDirectory(api, partial);
+  assert.equal(partiallyRemoved.cleaned, false);
+  assert.equal(directories.has(partial), false);
+  assert.equal(directories.has(partiallyRemoved.trashPath), true);
+  assert.equal(files.has(partiallyRemoved.trashPath + '/article.md'), false);
 });
 
 test('project creation does not remove a directory owned by another creator', async () => {

@@ -37,6 +37,44 @@ export function withStickerLanguage(prompt, language) {
   return text ? text + '\n\n统一主题语言（必须遵守）：' + instruction : instruction;
 }
 
+export function stickerBatchBindings(items, modelId, promptFor = item => item?.prompt) {
+  return (Array.isArray(items) ? items : []).map(item => ({
+    id: String(item?.id || ''),
+    prompt: String(promptFor(item) || ''),
+    modelId: String(modelId || ''),
+  })).filter(item => item.id);
+}
+
+export function stickerBatchMatches(bindings, items, modelId, promptFor = item => item?.prompt) {
+  const current = stickerBatchBindings(items, modelId, promptFor);
+  if (!Array.isArray(bindings) || bindings.length !== current.length) return false;
+  return bindings.every((binding, index) => (
+    binding.id === current[index].id
+    && binding.prompt === current[index].prompt
+    && binding.modelId === current[index].modelId
+  ));
+}
+
+export function mergeStickerFiles(filesByItem = {}, items = [], updates = {}) {
+  const currentIds = new Set((Array.isArray(items) ? items : []).map(item => String(item?.id || '')));
+  const merged = Object.fromEntries(Object.entries(filesByItem || {})
+    .filter(([id, path]) => currentIds.has(id) && String(path || '')));
+  for (const [id, path] of Object.entries(updates || {})) {
+    if (currentIds.has(id) && String(path || '')) merged[id] = String(path);
+  }
+  return merged;
+}
+
+export function stickerBatchRetryable(batchItems = []) {
+  return (Array.isArray(batchItems) ? batchItems : [])
+    .some(item => ['failed', 'save-failed'].includes(String(item?.state || '')));
+}
+
+export function stickerBatchHasUnknown(batchItems = []) {
+  return (Array.isArray(batchItems) ? batchItems : [])
+    .some(item => String(item?.state || '') === 'unknown');
+}
+
 export function stickerCaptionPrefix(language, position) {
   const index = Math.max(1, Number(position) || 1);
   const normalized = normalizeStickerLanguage(language);

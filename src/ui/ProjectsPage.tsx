@@ -130,8 +130,12 @@ export function ProjectsPage({
     if (!window.confirm('删除文章项目“' + item.title + '”及其全部文件？此操作不可撤销。')) return;
     setDeleting(item.directory);
     try {
-      await deleteProjectDirectory(api, item.directory);
-      notify('文章项目已删除：' + item.directory, 'success');
+      const result = await deleteProjectDirectory(api, item.directory);
+      if (result.cleaned) {
+        notify('文章项目已删除：' + item.directory, 'success');
+      } else {
+        notify('文章项目已移入回收目录，但临时文件清理未完成：' + result.trashPath, 'warning');
+      }
       await onChanged().catch(error => notify('项目已删除，但列表刷新失败：' + errorText(error), 'warning'));
     } catch (error) {
       notify('删除文章项目失败：' + errorText(error), 'danger');
@@ -254,8 +258,12 @@ function ProjectWorkspace({
     if (!window.confirm('删除当前文章项目及其全部文件？此操作不可撤销。')) return;
     setDeleting(true);
     try {
-      await deleteProjectDirectory(api, project.directory);
-      notify('文章项目已删除：' + project.directory, 'success');
+      const result = await deleteProjectDirectory(api, project.directory);
+      if (result.cleaned) {
+        notify('文章项目已删除：' + project.directory, 'success');
+      } else {
+        notify('文章项目已移入回收目录，但临时文件清理未完成：' + result.trashPath, 'warning');
+      }
       await onChanged().catch(error => notify('项目已删除，但列表刷新失败：' + errorText(error), 'warning'));
       onClose();
     } catch (error) {

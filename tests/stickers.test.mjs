@@ -5,6 +5,11 @@ import { buildStickerPrompt } from '../src/lib/prompts.mjs';
 import {
   normalizeStickerLanguage,
   parseStickerSession,
+  mergeStickerFiles,
+  stickerBatchBindings,
+  stickerBatchHasUnknown,
+  stickerBatchMatches,
+  stickerBatchRetryable,
   stickerCaptionPrefix,
   stickerCoverPath,
   stickerDocumentMarkdown,
@@ -40,6 +45,46 @@ test('sticker prompt carries the unified theme language', () => {
   assert.match(prompt.system, /整组统一主题语言：繁體中文/);
   assert.match(prompt.user, /统一主题语言：繁體中文/);
   assert.doesNotMatch(prompt.system, /简体中文。画面内/);
+});
+
+test('sticker batch bindings reject reorder, prompt and model drift', () => {
+  const promptFor = item => withStickerLanguage(item.prompt, '简体中文');
+  const bindings = stickerBatchBindings(items, 'model-a', promptFor);
+  assert.equal(stickerBatchMatches(bindings, items, 'model-a', promptFor), true);
+  assert.equal(stickerBatchMatches(bindings, [items[1], items[0], items[2]], 'model-a', promptFor), false);
+  assert.equal(stickerBatchMatches(bindings, [
+    items[0],
+    { ...items[1], prompt: '修改后的提示词' },
+    items[2],
+  ], 'model-a', promptFor), false);
+  assert.equal(stickerBatchMatches(bindings, items, 'model-b', promptFor), false);
+  assert.equal(stickerBatchMatches(bindings, items.slice(0, 2), 'model-a', promptFor), false);
+});
+
+test('sticker batch merge keeps old images for failed or missing items', () => {
+  const previous = {
+    's-1': 'posts/stickers/demo/imgs/old-1.jpg',
+    's-2': 'posts/stickers/demo/imgs/old-2.jpg',
+    's-3': 'posts/stickers/demo/imgs/old-3.jpg',
+    removed: 'posts/stickers/demo/imgs/removed.jpg',
+  };
+  const merged = mergeStickerFiles(previous, items, {
+    's-1': 'posts/stickers/demo/imgs/new-1.jpg',
+    's-2': 'posts/stickers/demo/imgs/new-2.jpg',
+  });
+  assert.deepEqual(merged, {
+    's-1': 'posts/stickers/demo/imgs/new-1.jpg',
+    's-2': 'posts/stickers/demo/imgs/new-2.jpg',
+    's-3': 'posts/stickers/demo/imgs/old-3.jpg',
+  });
+});
+
+test('sticker batch cleanup keeps failed and unknown workspaces retryable', () => {
+  assert.equal(stickerBatchRetryable([{ state: 'succeeded' }, { state: 'failed' }]), true);
+  assert.equal(stickerBatchRetryable([{ state: 'save-failed' }]), true);
+  assert.equal(stickerBatchRetryable([{ state: 'succeeded' }, { state: 'unknown' }]), false);
+  assert.equal(stickerBatchHasUnknown([{ state: 'succeeded' }, { state: 'unknown' }]), true);
+  assert.equal(stickerBatchHasUnknown([{ state: 'failed' }]), false);
 });
 
 test('sticker document keeps image order, cover semantics and captions', () => {

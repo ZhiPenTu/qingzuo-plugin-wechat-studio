@@ -16,8 +16,13 @@ import {
 import {
   STICKER_LANGUAGES,
   STICKER_SESSION_PATH,
+  mergeStickerFiles,
   normalizeStickerLanguage,
   parseStickerSession,
+  stickerBatchBindings,
+  stickerBatchHasUnknown,
+  stickerBatchMatches,
+  stickerBatchRetryable,
   stickerCaptionPrefix,
   stickerDocumentMarkdown,
   stickerImageItems,
@@ -32,6 +37,7 @@ import type { StudioPreferences } from './preferences';
 
 type Notify = (text: string, tone?: Toast['tone']) => void;
 type StickerItem = { id: string; prompt: string; caption: string };
+type StickerBatchBinding = { id: string; prompt: string; modelId: string };
 
 function stickerId() {
   return 's-' + shortId(String(Date.now()) + Math.random().toString(36));
@@ -77,6 +83,8 @@ export function StickerPage({
   const [generatingItemId, setGeneratingItemId] = useState('');
   const [mcpWaiting, setMcpWaiting] = useState(false);
   const [batch, setBatch] = useState<any>(null);
+  const [batchBindings, setBatchBindings] = useState<StickerBatchBinding[]>([]);
+  const [batchWorkspacePath, setBatchWorkspacePath] = useState('');
   const [itemStates, setItemStates] = useState<Record<string, { state: string; error?: string; taskId?: string }>>({});
   const [directory, setDirectory] = useState('');
   const [outputFiles, setOutputFiles] = useState<any[]>([]);
@@ -397,6 +405,8 @@ export function StickerPage({
       setTitle([...String(value.title || topic)].slice(0, 64).join(''));
       setItems(value.images.map((item: any) => ({ id: stickerId(), prompt: String(item.prompt || ''), caption: String(item.caption || '') })));
       setBatch(null);
+      setBatchBindings([]);
+      setBatchWorkspacePath('');
       setDirectory('');
       setOutputFiles([]);
       setFilesByItem({});
@@ -408,6 +418,8 @@ export function StickerPage({
       setTitle(fallback.title);
       setItems(fallback.images);
       setBatch(null);
+      setBatchBindings([]);
+      setBatchWorkspacePath('');
       setDirectory('');
       setOutputFiles([]);
       setFilesByItem({});
@@ -422,11 +434,18 @@ export function StickerPage({
   function move(index: number, direction: number) {
     const target = index + direction;
     if (target < 0 || target >= items.length) return;
+    clearBatchBinding();
     setItems(current => {
       const next = [...current];
       [next[index], next[target]] = [next[target], next[index]];
       return next;
     });
+  }
+
+  function clearBatchBinding() {
+    setBatch(null);
+    setBatchBindings([]);
+    setBatchWorkspacePath('');
   }
 
   async function waitBatch(id: string, updateState = true) {
@@ -601,25 +620,43 @@ export function StickerPage({
     try {
       let dir = directory;
       let started;
+      let activeBindings: StickerBatchBinding[] = [];
+      let batchDirectory = '';
+      const runToken = mcpBatchToken();
       if (action === 'retry' && batch && dir) {
-        const retryable = batch.items.some((item: any) => ['failed', 'save-failed'].includes(item.state));
+        const retryable = stickerBatchRetryable(batch.items);
         if (!retryable) {
           notify('当前批次没有可重试的失败项。结果未知的图片不会自动重发。', 'warning');
           return;
         }
+        if (!stickerBatchMatches(batchBindings, items, modelId, generationPrompt)) {
+          clearBatchBinding();
+          notify('贴图顺序、提示词或图片模型已调整，旧批次不能继续重试；请单张重做或重新生成整组。', 'warning');
+          return;
+        }
+        batchDirectory = batchWorkspacePath || String(batch.workspacePath || '');
+        if (!batchDirectory) {
+          clearBatchBinding();
+          notify('找不到旧批次的生成目录，请单张重做或重新生成整组。', 'warning');
+          return;
+        }
+        activeBindings = batchBindings;
         started = await api.ai.batch.start({
           id: batch.id,
           revision: batch.revision,
-          workspacePath: dir + '/imgs',
+          workspacePath: batchDirectory,
           retryFailed: true,
         });
       } else {
         const date = new Date();
         const stamp = date.getFullYear() + String(date.getMonth() + 1).padStart(2, '0') + String(date.getDate()).padStart(2, '0');
         const slug = (title || topic).replace(/[^\u3400-\u9fffA-Za-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 28) || 'stickers';
-        dir = 'posts/stickers/' + stamp + '-' + slug + '-' + shortId(String(Date.now()));
+        dir = directory || 'posts/stickers/' + stamp + '-' + slug + '-' + shortId(String(Date.now()));
         await api.workspace.mkdir({ path: dir });
         await api.workspace.mkdir({ path: dir + '/imgs' });
+        batchDirectory = dir + '/imgs/.batch-' + runToken;
+        await api.workspace.mkdir({ path: batchDirectory });
+        activeBindings = stickerBatchBindings(items, modelId, generationPrompt);
         const created = await api.ai.batch.create({
           mode: 'generate',
           source: imageModelSource(imageModels, modelId),
@@ -629,54 +666,60 @@ export function StickerPage({
           concurrency: 2,
         });
         setDirectory(dir);
-        started = await api.ai.batch.start({ id: created.id, revision: created.revision, workspacePath: dir + '/imgs' });
+        setBatchBindings(activeBindings);
+        setBatchWorkspacePath(batchDirectory);
+        started = await api.ai.batch.start({
+          id: created.id,
+          revision: created.revision,
+          workspacePath: batchDirectory,
+        });
       }
       setBatch(started);
       const value = await waitBatch(started.id);
-      setItemStates(Object.fromEntries(items.map((item, index) => {
-        const batchItem = value.items[index];
-        return [item.id, {
+      setItemStates(Object.fromEntries((value.items || []).map((batchItem: any, index: number) => {
+        const binding = activeBindings[index];
+        return binding ? [binding.id, {
           state: batchItem?.state || 'unknown',
           error: batchItem?.error || '',
           taskId: batchItem?.taskId || '',
-        }];
-      })));
+        }] : null;
+      }).filter(Boolean) as Array<[string, { state: string; error: string; taskId: string }]>));
       if (value.state !== 'finished') {
         notify(value.state === 'interrupted' ? '贴图生成被中断，请检查状态后明确重试。' : '贴图生成已结束。', 'warning');
         return;
       }
-      const entries = await api.workspace.list({ path: dir + '/imgs', recursive: false });
+      const entries = await api.workspace.list({ path: batchDirectory, recursive: false });
       const generated = entries
         .filter((entry: any) => entry.kind === 'file' && /生成图-\d+-ai-/.test(entry.path))
         .map((entry: any) => ({ ...entry, batchIndex: Number(entry.path.match(/生成图-(\d+)/)?.[1] || 0) }))
         .filter((entry: any) => entry.batchIndex > 0);
+      const updates: Record<string, string> = {};
       for (const entry of generated) {
         const extension = entry.path.split('.').pop()?.toLowerCase() || 'png';
-        const item = items[entry.batchIndex - 1];
-        if (!item) continue;
-        await api.workspace.rename({
-          from: entry.path,
-          to: dir + '/imgs/sticker-' + item.id + '.' + extension,
-        });
+        const binding = activeBindings[entry.batchIndex - 1];
+        if (!binding) continue;
+        const finalPath = dir + '/imgs/sticker-' + binding.id + '-' + runToken + '.' + extension;
+        await api.workspace.rename({ from: entry.path, to: finalPath });
+        updates[binding.id] = finalPath;
       }
       const output = await api.workspace.list({ path: dir + '/imgs', recursive: false });
-      const mapping: Record<string, string> = {};
-      for (const item of items) {
-        const file = output.find((entry: any) => entry.kind === 'file' && entry.name.startsWith('sticker-' + item.id + '.'));
-        if (file) mapping[item.id] = file.path;
-      }
+      const available = new Set(output.filter((entry: any) => entry.kind === 'file').map((entry: any) => entry.path));
+      const retained = Object.fromEntries(Object.entries(filesByItem)
+        .filter(([, path]) => available.has(path)));
+      const mapping = mergeStickerFiles(retained, items, updates);
       await persistPlan(dir, mapping);
-      setOutputFiles(output);
+      setOutputFiles(output.filter((entry: any) => entry.kind === 'file'));
       setFilesByItem(mapping);
       for (const item of items) {
         const previous = filesByItem[item.id];
         const next = mapping[item.id];
         if (previous && next && previous !== next) await api.workspace.remove({ path: previous }).catch(() => {});
       }
+      const retryable = stickerBatchRetryable(value.items);
+      const unknown = stickerBatchHasUnknown(value.items);
+      if (!unknown && !retryable) await api.workspace.remove({ path: batchDirectory, recursive: true }).catch(() => {});
       await onChanged().catch(() => {});
       const missing = items.length - Object.keys(mapping).length;
-      const retryable = value.items.some((item: any) => ['failed', 'save-failed'].includes(item.state));
-      const unknown = value.items.some((item: any) => item.state === 'unknown');
       if (missing > 0 || retryable || unknown) {
         notify('贴图方案已保存，仍有 ' + Math.max(0, missing) + ' 张缺失' + (unknown ? '，其中包含结果未知项' : '') + '。请明确选择重试或重新生成。', 'warning');
       } else {
@@ -1153,20 +1196,20 @@ export function StickerPage({
       {sessionRestored ? <div className="notice info">已恢复上次贴图方案；若上次草稿状态未决，请先核对后台再继续。</div> : null}
       <section className="panel">
         <div className="form-grid form-grid-3">
-          <Field label="主题"><input value={topic} onChange={event => setTopic(event.target.value)} placeholder="今天想讲清什么？" disabled={operationBusy} /></Field>
+          <Field label="主题"><input value={topic} onChange={event => { clearBatchBinding(); setTopic(event.target.value); }} placeholder="今天想讲清什么？" disabled={operationBusy} /></Field>
           <Field label="图片数量">
             <select value={count} onChange={event => setCount(Number(event.target.value))} disabled={operationBusy}>
               {Array.from({ length: 9 }, (_, index) => index + 1).map(value => <option key={value} value={value}>{value} 张</option>)}
             </select>
           </Field>
-          <Field label="统一风格"><input value={style} onChange={event => setStyle(event.target.value)} disabled={operationBusy} /></Field>
+          <Field label="统一风格"><input value={style} onChange={event => { clearBatchBinding(); setStyle(event.target.value); }} disabled={operationBusy} /></Field>
           <Field label="主题语言" hint="统一控制画面内可见文字与逐图配文。">
-            <select value={language} onChange={event => setLanguage(normalizeStickerLanguage(event.target.value))} disabled={operationBusy}>
+            <select value={language} onChange={event => { clearBatchBinding(); setLanguage(normalizeStickerLanguage(event.target.value)); }} disabled={operationBusy}>
               {STICKER_LANGUAGES.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
             </select>
           </Field>
           <Field label="统一媒介">
-            <select value={medium} onChange={event => setMedium(event.target.value)} disabled={operationBusy}>
+            <select value={medium} onChange={event => { clearBatchBinding(); setMedium(event.target.value); }} disabled={operationBusy}>
               {IMAGE_MEDIA.map(value => <option key={value}>{value}</option>)}
             </select>
           </Field>
@@ -1176,7 +1219,7 @@ export function StickerPage({
           </Field>
         ) : (
           <Field label="图片模型">
-            <select value={modelId} onChange={event => setModelId(event.target.value)} disabled={operationBusy}>
+            <select value={modelId} onChange={event => { clearBatchBinding(); setModelId(event.target.value); }} disabled={operationBusy}>
               {imageModels.map(model => <option key={model.id} value={model.id}>{imageModelLabel(model)}</option>)}
             </select>
           </Field>
@@ -1194,7 +1237,7 @@ export function StickerPage({
           <div className="section-heading">
             <div><h2>{title || topic}</h2><p>{items.length} 张 · {style} · {medium} · {language}</p></div>
             <div className="toolbar">
-              <Button type="button" onClick={() => setItems(current => [...current, { id: stickerId(), prompt: '', caption: '' }])} disabled={items.length >= 9 || operationBusy}>加一张</Button>
+              <Button type="button" onClick={() => { clearBatchBinding(); setItems(current => [...current, { id: stickerId(), prompt: '', caption: '' }]); }} disabled={items.length >= 9 || operationBusy}>加一张</Button>
               <Button type="button" onClick={() => void copyCaptions()}>复制配文</Button>
             </div>
           </div>
@@ -1217,12 +1260,12 @@ export function StickerPage({
                     <div>
                       <button type="button" onClick={() => move(index, -1)} aria-label="上移" disabled={index === 0 || operationBusy}>↑</button>
                       <button type="button" onClick={() => move(index, 1)} aria-label="下移" disabled={index === items.length - 1 || operationBusy}>↓</button>
-                      <button type="button" onClick={() => setItems(current => current.filter(entry => entry.id !== item.id))} aria-label="删除" disabled={operationBusy}>×</button>
+                      <button type="button" onClick={() => { clearBatchBinding(); setItems(current => current.filter(entry => entry.id !== item.id)); }} aria-label="删除" disabled={operationBusy}>×</button>
                     </div>
                   </header>
                   <div className="sticker-item-content">
                     <Field label="画面提示词" hint={'统一主题语言：' + language}>
-                      <textarea value={item.prompt} onChange={event => setItems(current => current.map((entry, itemIndex) => itemIndex === index ? { ...entry, prompt: event.target.value } : entry))} rows={5} disabled={operationBusy} />
+                      <textarea value={item.prompt} onChange={event => { clearBatchBinding(); setItems(current => current.map((entry, itemIndex) => itemIndex === index ? { ...entry, prompt: event.target.value } : entry)); }} rows={5} disabled={operationBusy} />
                     </Field>
                     <Field label="配文">
                       <textarea value={item.caption} onChange={event => setItems(current => current.map((entry, itemIndex) => itemIndex === index ? { ...entry, caption: event.target.value } : entry))} rows={3} disabled={operationBusy} />
@@ -1253,14 +1296,14 @@ export function StickerPage({
               );
             })}
           </div>
-          {batch?.items?.some((item: any) => item.state === 'unknown') ? (
+          {stickerBatchHasUnknown(batch?.items) ? (
             <div className="notice warning">有图片生成结果未知，不会自动重发。贴图目录的 mcp-generation.json 已记录任务 ID，请先检查后台，确认后再重新生成。</div>
           ) : null}
-          {imageGenerator === 'mcp' && batch?.items?.some((item: any) => ['failed', 'save-failed'].includes(item.state)) ? (
+          {imageGenerator === 'mcp' && stickerBatchRetryable(batch?.items) ? (
             <div className="notice warning">失败项可在对应卡片单独重试；“重新生成整组”仍会再次调用已成功项并可能重复计费。</div>
           ) : null}
           <div className="toolbar toolbar-end">
-            {imageGenerator === 'model' && batch?.items?.some((item: any) => ['failed', 'save-failed'].includes(item.state)) ? (
+            {imageGenerator === 'model' && stickerBatchRetryable(batch?.items) ? (
               <Button type="button" variant="danger" onClick={() => void generate('retry')} busy={generating} disabled={operationBusy && !generating}>明确重试失败项</Button>
             ) : null}
             {imageGenerator === 'mcp' && mcpWaiting ? <Button type="button" variant="danger" onClick={() => mcpAbort.current?.abort()}>停止等待</Button> : null}

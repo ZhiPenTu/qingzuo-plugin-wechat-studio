@@ -200,19 +200,17 @@ export async function deleteProjectDirectory(api, directory) {
   }
   const parent = target.slice(0, target.lastIndexOf('/'));
   const name = target.slice(target.lastIndexOf('/') + 1);
-  const tombstone = parent + '/.deleting-' + name + '-' + Date.now().toString(36)
+  const trashRoot = parent + '/.trash';
+  const tombstone = trashRoot + '/' + name + '-' + Date.now().toString(36)
     + '-' + Math.random().toString(36).slice(2, 8);
+  await api.workspace.mkdir({ path: trashRoot });
   await api.workspace.rename({ from: target, to: tombstone });
   try {
     await api.workspace.remove({ path: tombstone, recursive: true });
-  } catch (error) {
-    try {
-      await api.workspace.rename({ from: tombstone, to: target });
-    } catch {
-      throw new Error('删除失败，且无法恢复项目目录。请在工作区手动检查：' + tombstone);
-    }
-    throw error;
+  } catch {
+    return { cleaned: false, trashPath: tombstone };
   }
+  return { cleaned: true, trashPath: tombstone };
 }
 
 export async function saveStage(api, directory, stage, content, options = {}) {
