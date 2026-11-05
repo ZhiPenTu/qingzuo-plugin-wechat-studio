@@ -14,6 +14,7 @@ import {
   targetImageSize,
 } from '../src/lib/images.mjs';
 import { centerCropRect, containRect } from '../src/lib/crop.mjs';
+import { buildWritingPrompt } from '../src/lib/prompts.mjs';
 
 test('image catalogs expose twelve covers, eight bodies and eight media', () => {
   assert.equal(COVER_STYLES.length, 12);
@@ -67,6 +68,158 @@ test('image plan separates cover and body slots with real content prompts', () =
   assert.match(plan.cover.prompt, /6% 安全边距/);
   assert.match(plan.items[0].prompt, /竖版 3:4/);
   assert.match(plan.items[0].prompt, /不得贴边或被裁切/);
+});
+
+test('image prompts are distilled from the article thesis, sections and nearby facts', () => {
+  const contextualArticle = `# 电商直播间开始，品牌为什么还在亏
+
+> 直播间真正决定利润的不是开场热闹，而是开播前一小时的清单、首播优惠承接和复盘口径。
+
+## 开播前：先把三张清单钉在桌上
+
+运营要在开播前 60 分钟确认商品排序、库存和优惠叠加规则，任何一项遗漏都会让流量进来后无法成交。
+
+![封面：直播间控制台上的开播清单](placeholder)
+
+![信息图：开播前 60 分钟的三张检查清单](placeholder)
+
+## 首播承接：优惠要跟着流量节奏走
+
+首场直播用 3 个阶梯优惠承接流量，而不是一次性放出最低价；每 20 分钟根据在线人数调整一次。
+
+![数据图表：在线人数与优惠力度的三段变化](placeholder)
+`;
+  const plan = planImages(contextualArticle, {
+    cover_aspect: '3:4',
+    article_image_aspect: '3:4',
+  }, {});
+  assert.match(plan.brief.thesis, /利润/);
+  assert.match(plan.cover.prompt, /核心主旨：.*利润/);
+  assert.match(plan.cover.prompt, /开播前：先把三张清单钉在桌上/);
+  assert.match(plan.cover.prompt, /60 分钟/);
+  assert.equal(plan.items[0].context.section, '开播前：先把三张清单钉在桌上');
+  assert.match(plan.items[0].prompt, /原文依据：.*60 分钟/);
+  assert.match(plan.items[0].prompt, /商品排序、库存和优惠叠加规则/);
+  assert.doesNotMatch(plan.items[0].prompt, /placeholder/);
+  assert.match(plan.items[1].prompt, /3 个阶梯优惠/);
+  assert.match(plan.items[1].prompt, /20 分钟/);
+  assert.doesNotMatch(plan.items[1].prompt, /；；/);
+});
+
+test('writing prompt requires article-grounded image markers', () => {
+  const prompt = buildWritingPrompt({ image_density: '每节一图' }, {}, {}).system;
+  assert.match(prompt, /每个图位说明必须从本节正文提炼/);
+  assert.match(prompt, /封面标记必须同时扣住标题和导语主旨/);
+  assert.match(prompt, /不得为了配图虚构正文中没有的事实/);
+});
+
+test('table facts are distilled into readable labels instead of markdown pipes', () => {
+  const source = `# 数据文章
+
+> 导语说明文章只讨论成本结构。
+
+## 成本结构
+
+| 项目 | 数值 |
+|---|---|
+| 成本 | 30% |
+
+![数据图表：成本变化](placeholder)
+`;
+  const plan = planImages(source, {}, {});
+  assert.match(plan.brief.facts.join(' '), /项目：成本，数值：30%/);
+  assert.match(plan.items[0].prompt, /原文依据：项目：成本，数值：30%/);
+  assert.doesNotMatch(plan.items[0].prompt, /\|\s*-{3,}/);
+});
+
+test('data charts do not demand numeric facts from a section without numbers', () => {
+  const source = `# 投放复盘
+
+> 这篇文章只讨论成本和投放之间的关系。
+
+## 关键判断
+
+履约成本才是关键，投放并不是主因，团队需要先看清成本结构。
+
+![数据图表：成本与投放的关系](placeholder)
+`;
+  const plan = planImages(source, {}, {});
+  assert.equal(plan.items[0].context.numericFacts.length, 0);
+  assert.match(plan.items[0].prompt, /原文没有明确数字时只画关系或数量级/);
+  assert.doesNotMatch(plan.items[0].prompt, /数字逐字使用/);
+});
+
+test('indented code and inline image alt do not leak into article facts', () => {
+  const source = `# 客户增长
+
+> 正文讨论 42 个客户 ![封面：库存清单](cover.png) 的续费变化。
+
+## 数据
+
+    伪造代码里的 999% 不应进入提示词。
+
+真实数据只有 42 个客户。
+
+![数据图表：客户续费变化](placeholder)
+`;
+  const plan = planImages(source, {}, {});
+  const prompt = plan.items[0].prompt;
+  assert.match(prompt, /42 个客户/);
+  assert.doesNotMatch(prompt, /999%/);
+  assert.doesNotMatch(prompt, /封面：库存清单/);
+});
+
+test('oversized numeric facts are dropped rather than truncated into a fake number', () => {
+  const prefix = '这是一段没有标点的背景说明'.repeat(14);
+  const source = `# 数据边界
+
+> 导语说明文章关注长期变化。
+
+## 增长
+
+${prefix}最终达到 1234 万元。
+
+![数据图表：增长变化](placeholder)
+`;
+  const plan = planImages(source, {}, {});
+  assert.equal(plan.items[0].context.numericFacts.length, 0);
+  assert.doesNotMatch(plan.items[0].prompt, /数字逐字使用/);
+  assert.doesNotMatch(plan.items[0].prompt, /1234[\s\S]*…/);
+});
+
+test('numeric facts keep the unit attached when the excerpt is clipped', () => {
+  const prefix = '这是一段没有标点的背景说明'.repeat(8);
+  const source = `# 数据边界
+
+> 导语说明文章关注长期变化。
+
+## 增长
+
+${prefix} 1234 万元增长数据需要保留。
+
+![数据图表：增长变化](placeholder)
+`;
+  const plan = planImages(source, {}, {});
+  assert.match(plan.items[0].context.numericFacts.join(' '), /1234 万元/);
+  assert.match(plan.items[0].prompt, /数字逐字使用：.*1234 万元/);
+});
+
+test('indented list continuations after a blank stay in the section context', () => {
+  const source = `# 客户清单
+
+> 导语说明文章讨论客户续费。
+
+## 清单
+
+- **第一项**：已有 100 个客户续费。
+
+    第二项补充说明，含 200 个客户。
+
+![信息图：客户续费清单](placeholder)
+`;
+  const plan = planImages(source, {}, {});
+  assert.match(plan.items[0].context.evidence, /200 个客户/);
+  assert.match(plan.items[0].prompt, /200 个客户/);
 });
 
 test('cover and body aspect ratios can be configured independently', () => {

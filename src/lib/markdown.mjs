@@ -156,6 +156,7 @@ export function extractImageSlots(markdown, { captionStyle = '有图注' } = {})
       caption: caption && wantCaption(alt, captionStyle) ? caption : '',
       cover,
       index: slots.length,
+      lineIndex,
     });
   }
   return slots;
