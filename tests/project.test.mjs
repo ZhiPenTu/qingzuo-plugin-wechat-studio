@@ -8,6 +8,7 @@ import {
   loadProject,
   nextStage,
   previousStage,
+  saveArticle,
   saveStage,
   slugify,
   stageProgress,
@@ -88,6 +89,27 @@ test('project creation avoids overwrite and starts rewrite work at writing', asy
   assert.equal(updated.pipeline.stage, 'review');
   const projects = await listProjects(api);
   assert.equal(projects.find(item => item.directory === 'drafts/20261103-demo-1').title, 'Demo');
+});
+
+test('saved layout settings survive a project reload', async () => {
+  const { api, directories } = memoryApi();
+  directories.add('drafts/20261103-layout');
+  const created = await createProject(api, {
+    title: 'Layout',
+    mode: 'rewrite',
+    initialStage: 'format',
+  }, new Date(2026, 10, 3));
+  await saveArticle(api, created.directory, {
+    default_format_preset: ['书卷'],
+    default_format_scheme: ['朱砂'],
+    format_color: '#8f3b25',
+    format_font_size: '16px',
+  });
+  const reloaded = await loadProject(api, created.directory);
+  assert.deepEqual(reloaded.article.default_format_preset, ['书卷']);
+  assert.deepEqual(reloaded.article.default_format_scheme, ['朱砂']);
+  assert.equal(reloaded.article.format_color, '#8f3b25');
+  assert.equal(reloaded.article.format_font_size, '16px');
 });
 
 test('custom drafts root stays inside the drafts workspace root', async () => {

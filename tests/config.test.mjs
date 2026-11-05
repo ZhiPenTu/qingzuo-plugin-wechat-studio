@@ -6,6 +6,7 @@ import {
   deepMerge,
   mergedConfig,
   normalizeConfigForSave,
+  resolveFormatOptions,
   resolvePreset,
   serializeConfig,
   splitSummarySetting,
@@ -20,6 +21,40 @@ test('config precedence is article > custom > default', () => {
   assert.equal(resolvePreset(config, { default_format_preset: ['杂志'] }, 'format_preset')[0], '杂志');
   assert.equal(resolvePreset(config, {}, 'format_preset')[0], '书卷');
   assert.equal(resolvePreset({ default_format_preset: ['资讯'] }, {}, 'format_preset')[0], '资讯');
+});
+
+test('format options preserve article overrides and inherit config defaults', () => {
+  const config = {
+    default_format_preset: ['资讯'],
+    default_format_scheme: ['墨黑'],
+    custom_format_preset: ['书卷'],
+    custom_format_scheme: ['朱砂'],
+    format_color: '#111111',
+    format_font_size: '16px',
+  };
+  assert.deepEqual(resolveFormatOptions(config, {
+    default_format_preset: ['杂志'],
+    default_format_scheme: ['靛青'],
+    format_color: '#222222',
+    format_font_size: '15px',
+  }), {
+    theme: '杂志',
+    scheme: '靛青',
+    color: '#222222',
+    fontSize: '15px',
+  });
+  assert.deepEqual(resolveFormatOptions(config, {}), {
+    theme: '书卷',
+    scheme: '朱砂',
+    color: '#111111',
+    fontSize: '16px',
+  });
+  assert.deepEqual(resolveFormatOptions({}, {}), {
+    theme: '亲和',
+    scheme: '',
+    color: '',
+    fontSize: '',
+  });
 });
 
 test('merged config preserves unknown fields', () => {

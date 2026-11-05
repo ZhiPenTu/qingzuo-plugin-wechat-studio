@@ -16,15 +16,35 @@ export function mappingForPlan(plan, text) {
     const savedItems = Array.isArray(saved?.items) ? saved.items : [];
     const currentItems = Array.isArray(plan.items) ? plan.items : [];
     const keyOf = item => String(item?.slotIndex ?? '') + '\n' + String(item?.alt ?? '');
+    const altOf = item => String(item?.alt ?? '');
     const savedBySlot = new Map();
-    for (const item of savedItems) {
+    const savedByAlt = new Map();
+    for (const [savedIndex, item] of savedItems.entries()) {
       const relative = mapping[item?.index];
-      if (relative) savedBySlot.set(keyOf(item), relative);
+      if (!relative) continue;
+      const entry = { savedIndex, relative };
+      const slots = savedBySlot.get(keyOf(item)) || [];
+      slots.push(entry);
+      savedBySlot.set(keyOf(item), slots);
+      const list = savedByAlt.get(altOf(item)) || [];
+      list.push(entry);
+      savedByAlt.set(altOf(item), list);
     }
+    const used = new Set();
     const transferred = {};
     for (const item of currentItems) {
-      const relative = savedBySlot.get(keyOf(item));
-      if (relative) transferred[item.index] = relative;
+      const exact = (savedBySlot.get(keyOf(item)) || []).find(entry => !used.has(entry.savedIndex));
+      if (exact) {
+        transferred[item.index] = exact.relative;
+        used.add(exact.savedIndex);
+      }
+    }
+    for (const item of currentItems) {
+      if (transferred[item.index]) continue;
+      const fallback = (savedByAlt.get(altOf(item)) || []).find(entry => !used.has(entry.savedIndex));
+      if (!fallback) continue;
+      transferred[item.index] = fallback.relative;
+      used.add(fallback.savedIndex);
     }
     return transferred;
   } catch {

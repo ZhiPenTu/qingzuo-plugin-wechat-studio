@@ -27,6 +27,36 @@ test('generated mapping follows slot identity instead of array position', () => 
     ],
   };
   assert.deepEqual(mappingForPlan(changed, saved), { 0: 'imgs/body-02-b.jpg' });
+
+  const shifted = {
+    items: [
+      { index: 0, slotIndex: 8, alt: '氛围：乙' },
+      { index: 1, slotIndex: 4, alt: '信息图：甲' },
+    ],
+  };
+  assert.deepEqual(mappingForPlan(shifted, saved), {
+    0: 'imgs/body-02-b.jpg',
+    1: 'imgs/body-01-a.jpg',
+  });
+
+  const duplicateAlt = JSON.stringify({
+    items: [
+      { index: 0, slotIndex: 1, alt: '信息图：甲' },
+      { index: 1, slotIndex: 2, alt: '信息图：甲' },
+    ],
+    generated: { 0: 'imgs/body-01-a.jpg', 1: 'imgs/body-02-b.jpg' },
+  });
+  const shiftedDuplicate = {
+    items: [
+      { index: 0, slotIndex: 91, alt: '信息图：甲' },
+      { index: 1, slotIndex: 2, alt: '信息图：甲' },
+      { index: 2, slotIndex: 92, alt: '信息图：甲' },
+    ],
+  };
+  assert.deepEqual(mappingForPlan(shiftedDuplicate, duplicateAlt), {
+    0: 'imgs/body-01-a.jpg',
+    1: 'imgs/body-02-b.jpg',
+  });
 });
 
 test('generated mapping is ignored when the saved plan is invalid', () => {

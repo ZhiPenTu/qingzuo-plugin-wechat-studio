@@ -8,7 +8,9 @@ import {
   chooseMedium,
   mapGeneratedFiles,
   planImages,
+  rewriteCoverImageMarker,
   rewriteImageMarkers,
+  rewriteImageMarkersWithMapping,
   targetImageSize,
 } from '../src/lib/images.mjs';
 import { centerCropRect } from '../src/lib/crop.mjs';
@@ -95,6 +97,84 @@ test('rewriting markers uses stable local image paths', () => {
   const rewritten = rewriteImageMarkers(article, plan);
   assert.match(rewritten, /\(imgs\/body-01\.png "图：四步完成"\)/);
   assert.match(rewritten, /\(imgs\/body-02\.png\)/);
+});
+
+test('cover marker follows the selected cover image and keeps its caption', () => {
+  const plan = planImages(article, {}, {});
+  const replaced = rewriteCoverImageMarker(article, 'cover-new.jpg');
+  assert.match(replaced, /!\[封面：规整的配置台\]\(cover-new\.jpg\)/);
+  assert.doesNotMatch(replaced, /封面[^\n]*placeholder/);
+  assert.match(replaced, /\[信息图：四步操作流程\]\(placeholder/, 'body markers stay untouched');
+
+  const caption = rewriteCoverImageMarker('![封面：配置台](placeholder "封面图注")', 'cover.jpg');
+  assert.equal(caption, '![封面：配置台](cover.jpg "封面图注")');
+
+  const inserted = rewriteCoverImageMarker('# 标题\n\n正文', 'cover.jpg', { insert: true, plan });
+  assert.match(inserted, /^!\[封面：规矩自动加载\]\(cover\.jpg\)\n\n# 标题/);
+});
+
+test('mapping rewrite updates body images and the current cover together', () => {
+  const plan = planImages(article, {}, {});
+  const rewritten = rewriteImageMarkersWithMapping(article, plan, {
+    0: 'imgs/body-01.jpg',
+    1: 'imgs/body-02.jpg',
+  }, { cover: 'cover-new.jpg' });
+  assert.match(rewritten, /!\[封面：规整的配置台\]\(cover-new\.jpg\)/);
+  assert.match(rewritten, /\(imgs\/body-01\.jpg "图：四步完成"\)/);
+  assert.match(rewritten, /\(imgs\/body-02\.jpg\)/);
+  assert.doesNotMatch(rewritten, /\(placeholder/);
+});
+
+test('cover rewrite keeps a single cover and leaves fenced examples alone', () => {
+  const source = '# 标题\n\n![封面：旧](cover-old.jpg)\n\n```md\n![封面：示例](placeholder)\n```\n\n![封面：重复](cover-old-2.jpg)';
+  const rewritten = rewriteCoverImageMarker(source, 'cover-new.jpg');
+  assert.match(rewritten, /!\[封面：旧\]\(cover-new\.jpg\)/);
+  assert.match(rewritten, /```md\n!\[封面：示例\]\(placeholder\)\n```/);
+  assert.doesNotMatch(rewritten, /cover-old-2/);
+  assert.equal((rewritten.match(/!\[封面/g) || []).length, 2);
+});
+
+test('cover rewrite moves a misplaced cover to the top and handles CRLF', () => {
+  const source = '# 标题\n\n正文\n\n![封面：旧](placeholder)\n\n图注：封面说明\n\n![信息图：流程](placeholder)';
+  const moved = rewriteCoverImageMarker(source, 'cover-new.jpg');
+  assert.match(moved, /^!\[封面：旧\]\(cover-new\.jpg\)\n\n图注：封面说明\n\n# 标题/);
+  assert.doesNotMatch(moved, /!\[封面[^\n]*placeholder/);
+
+  const crlf = '![封面：旧](placeholder)\r\n\r\n![信息图：流程](placeholder)\r\n';
+  const plan = planImages(crlf, {}, {});
+  const rewritten = rewriteImageMarkersWithMapping(crlf, plan, { 0: 'imgs/body-01.jpg' }, { cover: 'cover-new.jpg' });
+  assert.match(rewritten, /!\[封面：旧\]\(cover-new\.jpg\)/);
+  assert.match(rewritten, /\[信息图：流程\]\(imgs\/body-01\.jpg\)/);
+  assert.doesNotMatch(rewritten, /\r/);
+});
+
+test('missing cover can downgrade stale cover paths to placeholders', () => {
+  assert.equal(rewriteCoverImageMarker('![封面：旧](cover-missing.jpg)', ''), '![封面：旧](cover-missing.jpg)');
+  assert.equal(
+    rewriteCoverImageMarker('![封面：旧](cover-missing.jpg)', '', { invalid: 'placeholder' }),
+    '![封面：旧](placeholder)',
+  );
+  assert.equal(
+    rewriteCoverImageMarker('# 标题', '', { insert: true, invalid: 'placeholder' }),
+    '# 标题',
+  );
+});
+
+test('fence tracking respects longer fences', () => {
+  const source = '![封面：旧](cover-old.jpg)\n\n````md\n```\n![封面：代码示例](placeholder)\n```\n````\n\n![封面：重复](cover-old-2.jpg)';
+  const rewritten = rewriteCoverImageMarker(source, 'cover-new.jpg');
+  assert.match(rewritten, /````md\n```\n!\[封面：代码示例\]\(placeholder\)\n```\n````/);
+  assert.doesNotMatch(rewritten, /cover-old-2/);
+});
+
+test('image plans skip fenced examples before real slots', () => {
+  const source = '# 标题\n\n~~~md\n![信息图：示例](placeholder)\n~~~\n\n![信息图：真实](placeholder)';
+  const plan = planImages(source, {}, {});
+  assert.equal(plan.items.length, 1);
+  assert.equal(plan.items[0].alt, '信息图：真实');
+  const rewritten = rewriteImageMarkersWithMapping(source, plan, { 0: 'imgs/body-01.jpg' }, { insertCover: false });
+  assert.match(rewritten, /~~~md\n!\[信息图：示例\]\(placeholder\)\n~~~/);
+  assert.match(rewritten, /!\[信息图：真实\]\(imgs\/body-01\.jpg\)/);
 });
 
 test('generated outputs map in batch index order and crop centers', () => {
