@@ -338,7 +338,7 @@ function contextForSlot(slot, blocks, brief) {
   };
 }
 
-function coverCopy(title) {
+export function coverCopy(title) {
   const raw = String(title || '')
     .replace(/[：:｜|—–-].*$/, '')
     .replace(/[^\u3400-\u9fffA-Za-z0-9]/g, '')
@@ -349,8 +349,8 @@ function coverCopy(title) {
   return [...selected].slice(0, 7).join('');
 }
 
-function coverDescription(style, title, brief, config, aspect) {
-  const hook = coverCopy(title);
+export function coverDescription(style, title, brief, config, aspect, copyOverride = '') {
+  const hook = String(copyOverride || '').trim() || coverCopy(title);
   const common = '请直接生成一张微信公众号信息流封面，' + aspectDescription(aspect) + '。不要出现机器人、发光大脑、电路脑、机械手、灯泡或二进制雨。';
   const sections = brief.sections.slice(0, 3).join(' / ');
   const facts = joinPromptFacts(brief.facts.slice(0, 2), ' / ');
@@ -389,8 +389,8 @@ function coverDescription(style, title, brief, config, aspect) {
     compositionSafety(aspect);
 }
 
-function bodyDescription(style, slot, medium, aspect, context, brief) {
-  const content = slot.description || slot.alt;
+export function bodyDescription(style, slot, medium, aspect, context, brief, contentOverride = '') {
+  const content = String(contentOverride || '').trim() || slot.description || slot.alt;
   const base = '正文配图，' + aspectDescription(aspect) + '。必须使用文章里的真实内容，不得自行编造步骤、数字或结论。' +
     '媒介：' + medium + '。' + MEDIA_DESCRIPTIONS[medium] + '。';
   const evidence = context.evidence || content;
@@ -459,27 +459,36 @@ export function planImages(markdown, config = {}, article = {}) {
   if (!coverSlot) warnings.push('正文没有封面标记，将按文章标题生成一张封面。');
   const evidenceCount = bodySlots.filter(slot => slot.type === '实证').length;
   if (evidenceCount) warnings.push(evidenceCount + ' 个实证图位需要你提供真实截图或照片，插件不会伪造。');
+  const defaultCoverCopy = coverCopy(title);
+  const customCoverCopy = String(article.cover_copy || '').trim();
+  const coverCopyText = customCoverCopy || defaultCoverCopy;
   const cover = {
     style: COVER_STYLES.includes(coverStyle) ? coverStyle : chooseCoverStyle(title, source),
     aspect: coverAspect,
-    copy: coverCopy(title),
+    copy: coverCopyText,
+    defaultCopy: defaultCoverCopy,
     prompt: coverDescription(
       COVER_STYLES.includes(coverStyle) ? coverStyle : chooseCoverStyle(title, source),
       title,
       brief,
       merged,
       coverAspect,
+      coverCopyText,
     ),
     file: 'imgs/cover-raw.png',
     generate: imageSource !== 'user',
   };
+  const bodyCopies = article.body_copies && typeof article.body_copies === 'object' ? article.body_copies : {};
   const items = bodySlots.map((slot, index) => {
     const style = imageSource === 'user' ? '实证' : chooseBodyStyle(slot, bodyCandidates);
     const context = contextForSlot(slot, articleBlocks, brief);
+    const customContent = String(bodyCopies[index] ?? '').trim();
+    const effectiveAlt = customContent || slot.alt;
     return {
       slotIndex: slot.index,
       index,
-      alt: slot.alt,
+      originalAlt: slot.alt,
+      alt: effectiveAlt,
       src: slot.src,
       type: slot.type,
       caption: slot.caption,
@@ -489,7 +498,7 @@ export function planImages(markdown, config = {}, article = {}) {
       role: ['流程步骤', '结构分层', '数据图表', '对比两栏', '清单要点', '实证'].includes(style) ? '信息位' : '节奏位',
       generate: imageSource !== 'user' && style !== '实证',
       file: 'imgs/body-' + String(index + 1).padStart(2, '0') + '.png',
-      prompt: bodyDescription(style, slot, medium, bodyAspect, context, brief),
+      prompt: bodyDescription(style, slot, medium, bodyAspect, context, brief, customContent),
     };
   });
   const prompts = [...(cover.generate ? [cover.prompt] : []), ...items.filter(item => item.generate).map(item => item.prompt)];
@@ -594,11 +603,12 @@ export function rewriteImageMarkersWithMapping(markdown, plan, mapping = {}, { c
     if (isCoverImageAlt(alt)) return line;
     if (cursor >= items.length) return line;
     const item = items[cursor];
-    if (item.alt !== alt) return line;
+    if (item.alt !== alt && item.originalAlt !== alt) return line;
     cursor += 1;
     const path = mapping[item.index];
     if (!path) return line;
-    return imageMarker(alt, path, match[3]);
+    const persistentAlt = item.originalAlt || alt;
+    return imageMarker(persistentAlt, path, match[3]);
   });
   return rewriteCoverImageMarker(rewritten, cover, { insert: insertCover, plan, invalid: invalidCover });
 }

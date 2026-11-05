@@ -16,6 +16,9 @@ import {
   BODY_STYLES,
   COVER_STYLES,
   IMAGE_MEDIA,
+  bodyDescription,
+  coverCopy,
+  coverDescription,
   chooseMedium,
   mapGeneratedFiles,
   planImages,
@@ -943,8 +946,15 @@ function ImagesStage({
   const [mcpWaiting, setMcpWaiting] = useState(false);
   const initialCoverImageStyle = String(project.article.cover_image_style || '').trim();
   const initialMedium = String(project.article.image_medium || '').trim();
+  const initialCoverCopy = String(project.article.cover_copy || '').trim();
   const [coverImageStyle, setCoverImageStyle] = useState(COVER_STYLES.includes(initialCoverImageStyle) ? initialCoverImageStyle : '');
   const [medium, setMedium] = useState(IMAGE_MEDIA.includes(initialMedium) ? initialMedium : '');
+  const [coverCopyText, setCoverCopyText] = useState(initialCoverCopy);
+  const [bodyCopies, setBodyCopies] = useState<Record<number, string>>(() => {
+    return project.article.body_copies && typeof project.article.body_copies === 'object'
+      ? { ...project.article.body_copies }
+      : {};
+  });
   const [planning, setPlanning] = useState(true);
   const [batchPath, setBatchPath] = useState('');
   const [previews, setPreviews] = useState<PreviewImage[]>([]);
@@ -955,6 +965,7 @@ function ImagesStage({
   const generatedMapping = useRef<Record<number, string>>({});
   const syncedCoverImageStyle = useRef(initialCoverImageStyle);
   const syncedMedium = useRef(initialMedium);
+  const syncedCoverCopy = useRef(initialCoverCopy);
   const imageSource = String(project.article.image_source || config.image_source || 'generated');
   const imageGenerator = config.image_generator === 'mcp' ? 'mcp' : 'model';
   const mcpServer = servers.find(server => server.id === config.mcp_image_server);
@@ -986,6 +997,13 @@ function ImagesStage({
   }, [project.article.image_medium]);
 
   useEffect(() => {
+    const value = String(project.article.cover_copy || '').trim();
+    if (value === syncedCoverCopy.current) return;
+    syncedCoverCopy.current = value;
+    setCoverCopyText(value);
+  }, [project.article.cover_copy]);
+
+  useEffect(() => {
     if (!imageModels.some(model => model.id === modelId)) setModelId(imageModels[0]?.id || '');
   }, [imageModels, modelId]);
 
@@ -1005,6 +1023,8 @@ function ImagesStage({
         ...project.article,
         ...(coverImageStyle ? { cover_image_style: coverImageStyle } : {}),
         ...(medium ? { image_medium: medium } : {}),
+        ...(coverCopyText ? { cover_copy: coverCopyText } : {}),
+        body_copies: bodyCopies,
       },
     }).then(value => {
       if (!cancelled) setPlan(value);
@@ -1016,7 +1036,7 @@ function ImagesStage({
     return () => {
       cancelled = true;
     };
-  }, [baseMarkdown, config, project.article, coverImageStyle, medium, notify]);
+  }, [baseMarkdown, config, project.article, coverImageStyle, medium, coverCopyText, bodyCopies, notify]);
 
   async function waitBatch(id: string, updateState = true) {
     for (let index = 0; index < 600; index += 1) {
@@ -1080,6 +1100,65 @@ function ImagesStage({
         ...current,
         items: current.items.map((item: any, index: number) => index === position ? { ...item, state, error } : item),
       };
+    });
+  }
+
+  function handleCoverCopyChange(value: string) {
+    const trimmed = value.trim();
+    setCoverCopyText(value);
+    setPlan((current: any) => {
+      if (!current?.cover) return current;
+      const effectiveCopy = trimmed || current.cover.defaultCopy || coverCopy(current.title);
+      const nextPrompt = coverDescription(
+        current.cover.style,
+        current.title,
+        current.brief,
+        config,
+        current.cover.aspect,
+        effectiveCopy,
+      );
+      const nextCover = { ...current.cover, copy: effectiveCopy, prompt: nextPrompt };
+      const nextPrompts = [
+        ...(nextCover.generate ? [nextCover.prompt] : []),
+        ...(current.items || []).filter((item: any) => item.generate).map((item: any) => item.prompt),
+      ];
+      return { ...current, cover: nextCover, prompts: nextPrompts };
+    });
+  }
+
+  function handleBodyCopyChange(index: number, value: string) {
+    const trimmed = value.trim();
+    setBodyCopies(current => {
+      const next = { ...current };
+      if (!trimmed) delete next[index];
+      else next[index] = value;
+      return next;
+    });
+    setPlan((current: any) => {
+      if (!current?.items) return current;
+      const nextItems = current.items.map((item: any) => {
+        if (item.index !== index) return item;
+        const effectiveContent = trimmed || item.originalAlt;
+        const nextPrompt = bodyDescription(
+          item.style,
+          item,
+          medium || current.medium,
+          item.aspect,
+          item.context,
+          current.brief,
+          effectiveContent,
+        );
+        return {
+          ...item,
+          alt: effectiveContent,
+          prompt: nextPrompt,
+        };
+      });
+      const nextPrompts = [
+        ...(current.cover?.generate ? [current.cover.prompt] : []),
+        ...nextItems.filter((item: any) => item.generate).map((item: any) => item.prompt),
+      ];
+      return { ...current, items: nextItems, prompts: nextPrompts };
     });
   }
 
@@ -1186,6 +1265,8 @@ function ImagesStage({
         } : {}),
         image_medium: plan.medium,
         cover_image_style: plan.cover.style,
+        cover_copy: coverCopyText.trim(),
+        body_copies: bodyCopies,
       });
     } catch (error) {
       if (previousMarkdown) await api.workspace.writeText({ path: project.directory + '/article.md', text: previousMarkdown, overwrite: true }).catch(() => {});
@@ -1894,6 +1975,8 @@ function ImagesStage({
         } : {}),
         image_medium: plan.medium,
         cover_image_style: plan.cover.style,
+        cover_copy: coverCopyText.trim(),
+        body_copies: bodyCopies,
       });
       for (const entry of generated) await api.workspace.remove({ path: entry.path }).catch(() => {});
     } catch (error) {
@@ -1925,14 +2008,41 @@ function ImagesStage({
   const pendingSlots = (plan?.items || []).filter((item: any) => /^placeholder(?:-|$)/i.test(String(item.src || '')));
 
   async function saveSelection() {
-    const patch: Record<string, string> = {};
+    const patch: Record<string, any> = {};
     if (coverImageStyle && coverImageStyle !== String(project.article.cover_image_style || '').trim()) {
       patch.cover_image_style = coverImageStyle;
     }
     if (medium && medium !== String(project.article.image_medium || '').trim()) {
       patch.image_medium = medium;
     }
+    const cleanCoverCopy = coverCopyText.trim();
+    if (cleanCoverCopy !== String(project.article.cover_copy || '').trim()) {
+      patch.cover_copy = cleanCoverCopy;
+    }
+    const cleanBodyCopies: Record<number, string> = {};
+    for (const [key, val] of Object.entries(bodyCopies)) {
+      if (val && String(val).trim()) cleanBodyCopies[Number(key)] = String(val).trim();
+    }
+    if (JSON.stringify(cleanBodyCopies) !== JSON.stringify(project.article.body_copies || {})) {
+      patch.body_copies = cleanBodyCopies;
+    }
     if (Object.keys(patch).length) await saveArticle(api, project.directory, patch);
+    if (plan) {
+      await api.workspace.writeText({
+        path: project.directory + '/img-plan.json',
+        text: JSON.stringify({ ...plan, generated: generatedMapping.current }, null, 2),
+        overwrite: true,
+      });
+      const rewritten = rewriteImageMarkersWithMapping(baseMarkdown, plan, generatedMapping.current, {
+        cover: savedCover,
+        invalidCover: 'placeholder',
+      });
+      if (rewritten !== baseMarkdown) {
+        const rendered = await renderArticle(rewritten);
+        await api.workspace.writeText({ path: project.directory + '/article.md', text: rewritten, overwrite: true });
+        await api.workspace.writeText({ path: project.directory + '/article.html', text: rendered.html, overwrite: true });
+      }
+    }
   }
 
   async function saveAndContinue(next: boolean) {
@@ -1986,9 +2096,32 @@ function ImagesStage({
           <div className="image-plan">
             <article className={'plan-card cover-plan' + (coverHasMedia ? ' has-media' : '')}>
               <div className="plan-card-body">
-                <Badge tone="accent">封面</Badge>
-                <strong>{plan.cover.style}</strong>
-                <p>文案：{plan.cover.copy} · {plan.cover.aspect}</p>
+                <span className="plan-card-top">
+                  <Badge tone="accent">封面</Badge>
+                  <Badge tone="neutral">{plan.cover.style}</Badge>
+                  <span className="plan-card-aspect-tag">{plan.cover.aspect}</span>
+                </span>
+                <div className="plan-copy-field">
+                  <span className="plan-copy-label">文案：</span>
+                  <input
+                    type="text"
+                    className="plan-copy-input"
+                    value={coverCopyText !== '' ? coverCopyText : plan.cover.copy}
+                    placeholder="输入封面文案/压字"
+                    aria-label="封面文案"
+                    onChange={event => handleCoverCopyChange(event.target.value)}
+                  />
+                  {Boolean(coverCopyText && coverCopyText !== (plan.cover.defaultCopy || coverCopy(plan.title))) ? (
+                    <button
+                      type="button"
+                      className="plan-copy-reset"
+                      title="恢复自动提炼文案"
+                      onClick={() => handleCoverCopyChange('')}
+                    >
+                      重置
+                    </button>
+                  ) : null}
+                </div>
                 <details><summary>提示词</summary><pre>{plan.cover.prompt}</pre></details>
               </div>
               {coverHasMedia ? (
@@ -2028,9 +2161,30 @@ function ImagesStage({
                       <Badge tone={item.role === '信息位' ? 'warning' : 'neutral'}>{item.role}</Badge>
                       <Badge tone="neutral">{item.style}</Badge>
                       {/^placeholder(?:-|$)/i.test(String(item.src || '')) ? <Badge tone="warning">待补图</Badge> : null}
+                      <span className="plan-card-aspect-tag">{item.aspect}</span>
                     </span>
-                    <strong>{item.alt}</strong>
-                    <p>{item.generate ? (image ? '已生成，可单独重做' : '将生成') : (image ? '已导入你提供的图片' : '需要你提供真实截图或照片')} · {item.aspect}</p>
+                    <div className="plan-copy-field">
+                      <span className="plan-copy-label">文案：</span>
+                      <input
+                        type="text"
+                        className="plan-copy-input"
+                        value={bodyCopies[item.index] ?? item.alt}
+                        placeholder="输入配图文案或画面说明"
+                        aria-label={'配图 ' + (item.index + 1) + ' 文案'}
+                        onChange={event => handleBodyCopyChange(item.index, event.target.value)}
+                      />
+                      {Boolean(bodyCopies[item.index] && bodyCopies[item.index].trim() !== (item.originalAlt || item.alt)) ? (
+                        <button
+                          type="button"
+                          className="plan-copy-reset"
+                          title="恢复图位原文说明"
+                          onClick={() => handleBodyCopyChange(item.index, '')}
+                        >
+                          重置
+                        </button>
+                      ) : null}
+                    </div>
+                    <p>{item.generate ? (image ? '已生成，可单独重做' : '将生成') : (image ? '已导入你提供的图片' : '需要你提供真实截图或照片')}</p>
                     <details><summary>提示词</summary><pre>{item.prompt}</pre></details>
                   </div>
                   {hasMedia ? (

@@ -231,6 +231,9 @@ export async function appendLog(api, directory, message) {
 export async function saveArticle(api, directory, patch) {
   const current = await loadProject(api, directory);
   const article = deepMerge(current.article, patch || {});
+  if (patch && Object.prototype.hasOwnProperty.call(patch, 'body_copies')) {
+    article.body_copies = structuredClone(patch.body_copies || {});
+  }
   await api.workspace.writeText({ path: directory + '/article.yaml', text: serializeArticle(article), overwrite: true });
   return article;
 }

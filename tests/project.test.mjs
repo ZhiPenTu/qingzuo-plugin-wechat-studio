@@ -125,3 +125,30 @@ test('custom drafts root stays inside the drafts workspace root', async () => {
   const projects = await listProjects(api, 'drafts/team');
   assert.ok(projects.some(item => item.directory === 'drafts/team/20261103-demo-1'));
 });
+
+test('custom image copies persist across reloads and clean up on reset', async () => {
+  const { api } = memoryApi();
+  const created = await createProject(api, {
+    title: '电商直播间开始售卖 token',
+    mode: 'rewrite',
+    initialStage: 'images',
+  }, new Date(2026, 10, 5));
+
+  // 保存自定义文案
+  await saveArticle(api, created.directory, {
+    cover_copy: '直播间卖算力了',
+    body_copies: { 2: '场景还原：书房晚间真实办公' },
+  });
+  let reloaded = await loadProject(api, created.directory);
+  assert.equal(reloaded.article.cover_copy, '直播间卖算力了');
+  assert.deepEqual(reloaded.article.body_copies, { 2: '场景还原：书房晚间真实办公' });
+
+  // 重置自定义文案，验证空对象不会被 deepMerge 留存旧键
+  await saveArticle(api, created.directory, {
+    cover_copy: '',
+    body_copies: {},
+  });
+  reloaded = await loadProject(api, created.directory);
+  assert.equal(reloaded.article.cover_copy, '');
+  assert.deepEqual(reloaded.article.body_copies, {});
+});

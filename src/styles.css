@@ -318,7 +318,32 @@ input::placeholder, textarea::placeholder { color: var(--qz-text-muted); opacity
 .plan-card-pending { border-color: color-mix(in srgb, var(--qz-warning) 35%, var(--qz-border)); background: var(--qz-warning-surface); }
 .cover-plan { background: var(--qz-primary-wash); }
 .plan-card p { margin: 0; color: var(--qz-text-muted); font-size: 12px; }
-.plan-card-top { display: flex; gap: 5px; }
+.plan-card-top { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+.plan-card-aspect-tag { margin-left: auto; color: var(--qz-text-muted); font-size: 11px; white-space: nowrap; }
+.plan-copy-field { display: flex; align-items: center; gap: 6px; min-width: 0; margin: 1px 0; }
+.plan-copy-label { font-size: 11.5px; font-weight: 600; color: var(--qz-text-muted); white-space: nowrap; }
+.plan-copy-input {
+  min-height: 29px;
+  padding: 0 8px;
+  font-size: 12px;
+  border-radius: 5px;
+  background: var(--qz-surface);
+  border: 1px solid var(--qz-border);
+  flex: 1;
+  min-width: 0;
+}
+.plan-copy-input:focus { border-color: var(--qz-focus); box-shadow: 0 0 0 2px var(--qz-selection); }
+.plan-copy-reset {
+  min-height: 24px;
+  padding: 0 6px;
+  font-size: 11px;
+  color: var(--qz-text-muted);
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.plan-copy-reset:hover { color: var(--qz-primary); text-decoration: underline; }
 .plan-card pre { max-height: 220px; overflow: auto; white-space: pre-wrap; word-break: break-word; font-size: 11px; background: var(--qz-surface-subtle); padding: 9px; border-radius: 6px; }
 .batch-list { display: grid; border: 1px solid var(--qz-border); border-radius: 8px; overflow: hidden; margin: 12px 0; }
 .batch-list > div { display: flex; align-items: center; gap: 9px; padding: 8px 10px; border-bottom: 1px solid var(--qz-border); }
