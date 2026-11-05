@@ -7,6 +7,7 @@ import {
   generateImagesThroughMcp,
   mcpBatchToken,
   mcpCoverSize,
+  mcpImageSize,
   pendingMcpGenerationId,
   renderMcpArguments,
 } from '../src/lib/mcp-images.mjs';
@@ -149,10 +150,13 @@ test('MCP batch tokens remain unique within the same millisecond', () => {
 });
 
 test('MCP cover sizes use provider-compatible common aspect ratios', () => {
+  assert.equal(mcpImageSize('3:4'), '3:4');
+  assert.equal(mcpImageSize('4:3'), '4:3');
+  assert.equal(mcpImageSize('1.91:1'), '16:9');
   assert.equal(mcpCoverSize('1:1'), '1:1');
   assert.equal(mcpCoverSize('2.35:1'), '16:9');
   assert.equal(mcpCoverSize('1.91:1'), '16:9');
-  assert.equal(mcpCoverSize(''), '16:9');
+  assert.equal(mcpCoverSize(''), '3:4');
 });
 
 test('side-effect drift re-authorizes before retrying an MCP image call', async () => {

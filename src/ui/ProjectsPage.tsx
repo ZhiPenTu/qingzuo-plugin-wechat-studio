@@ -22,10 +22,10 @@ import {
   rewriteCoverImageMarker,
   rewriteImageMarkersWithMapping,
 } from '../lib/images.mjs';
-import { compressBodyImageBytes, cropImageBytes, base64Bytes, bytesBase64 } from '../lib/crop.mjs';
-import { imageModelLabel, imageModelSource } from '../lib/image-models.mjs';
+import { compressBodyImageBytes, cropImageBytes, fitImageBytes, base64Bytes, bytesBase64 } from '../lib/crop.mjs';
+import { groupImageRequests, imageModelLabel, imageModelSource, imageParametersForModel } from '../lib/image-models.mjs';
 import { mappingForPlan, parseGeneratedMapping, projectImagePreviews } from '../lib/image-previews.mjs';
-import { generateImagesThroughMcp, mcpBatchToken, mcpCoverSize } from '../lib/mcp-images.mjs';
+import { generateImagesThroughMcp, mcpBatchToken, mcpImageSize } from '../lib/mcp-images.mjs';
 import { resolveFormatOptions } from '../lib/config.mjs';
 import {
   appendLog,
@@ -51,9 +51,15 @@ type Notify = (text: string, tone?: Toast['tone']) => void;
 type PreviewImage = { path: string; title: string; kind: 'cover' | 'body' };
 type ImageTarget = { kind: 'cover' } | { kind: 'body'; index: number };
 type ImageTargetStatus = { state: string; error?: string | null; taskId?: string | null };
+type ImageRequest = { target: ImageTarget; aspect: string; prompt: string; globalIndex: number };
 
 function imageTargetKey(target: ImageTarget) {
   return target.kind === 'cover' ? 'cover' : 'body:' + target.index;
+}
+
+function aspectCss(aspect: string) {
+  const match = /^(\d+(?:\.\d+)?):(\d+(?:\.\d+)?)$/.exec(String(aspect || ''));
+  return match ? match[1] + ' / ' + match[2] : '3 / 4';
 }
 
 function previewDocument(html: string) {
@@ -1083,6 +1089,16 @@ function ImagesStage({
     return String(plan.items.find((item: any) => item.index === target.index)?.prompt || '');
   }
 
+  function targetImageAspect(target: ImageTarget) {
+    if (target.kind === 'cover') return String(plan?.cover?.aspect || config.cover_aspect || '3:4');
+    const item = (plan?.items || []).find((candidate: any) => candidate.index === target.index);
+    return String(item?.aspect || config.article_image_aspect || '3:4');
+  }
+
+  function targetImageModel() {
+    return imageModels.find(model => model.id === modelId);
+  }
+
   function targetLabel(target: ImageTarget) {
     if (target.kind === 'cover') return '封面';
     const position = (plan?.items || []).findIndex((item: any) => item.index === target.index);
@@ -1132,8 +1148,8 @@ function ImagesStage({
       const sourceFile = await api.workspace.readFile({ path: sourcePath });
       const sourceBytes = base64Bytes(sourceFile.data);
       if (target.kind === 'cover') {
-        const coverAspect = String(config.cover_aspect || '2.35:1');
-        const cover = await cropImageBytes(sourceBytes, sourceFile.mime, coverAspect, 0.9);
+        const coverAspect = targetImageAspect(target);
+        const cover = await fitImageBytes(sourceBytes, sourceFile.mime, coverAspect, 0.9);
         const cover235 = await cropImageBytes(sourceBytes, sourceFile.mime, '2.35:1', 0.9);
         const cover11 = await cropImageBytes(sourceBytes, sourceFile.mime, '1:1', 0.9);
         coverPath = project.directory + '/cover-' + token + '.jpg';
@@ -1146,7 +1162,7 @@ function ImagesStage({
         await api.workspace.writeBase64({ path: cover11Path, data: bytesBase64(cover11), mime: 'image/jpeg', overwrite: false });
         createdFiles.push(cover11Path);
       } else {
-        const compressed = await compressBodyImageBytes(sourceBytes, sourceFile.mime);
+        const compressed = await compressBodyImageBytes(sourceBytes, sourceFile.mime, targetImageAspect(target));
         const targetPath = project.directory + '/imgs/body-' + String(target.index + 1).padStart(2, '0') + '-' + token + '.jpg';
         await api.workspace.writeBase64({ path: targetPath, data: bytesBase64(compressed), mime: 'image/jpeg', overwrite: false });
         createdFiles.push(targetPath);
@@ -1191,6 +1207,112 @@ function ImagesStage({
     return nextPreviews;
   }
 
+  async function runModelGroup(group: { parameters: Record<string, string>; items: ImageRequest[] }, position: number, total: number) {
+    const prompts = group.items.map(item => item.prompt);
+    setMessage('正在提交第 ' + (position + 1) + '/' + total + ' 组图片方案（' + group.items[0]?.aspect + '）…');
+    const created = await api.ai.batch.create({
+      mode: 'generate',
+      source: imageModelSource(imageModels, modelId),
+      modelId,
+      prompt: prompts[0],
+      items: prompts.map(prompt => ({ prompt })),
+      concurrency: 2,
+      ...(Object.keys(group.parameters).length ? { parameters: group.parameters } : {}),
+    });
+    const outputPath = project.directory + '/imgs/batches/' + created.id;
+    await api.workspace.mkdir({ path: outputPath });
+    const started = await api.ai.batch.start({
+      id: created.id,
+      revision: created.revision,
+      workspacePath: outputPath,
+    });
+    setMessage('正在生成第 ' + (position + 1) + '/' + total + ' 组，共 ' + started.items.length + ' 张图片…');
+    return {
+      requests: group.items,
+      value: await waitBatch(started.id, false),
+      outputPath,
+    };
+  }
+
+  async function combineModelGroups(runs: Array<{
+    requests: ImageRequest[];
+    value: any;
+    outputPath: string;
+  }>, totalTargets: number) {
+    const items = Array.from({ length: totalTargets }, (_value, index) => ({
+      id: 'pending-' + index,
+      name: '生成图-' + (index + 1),
+      state: 'pending',
+      error: null,
+      taskId: null,
+      prompt: plan?.prompts?.[index] || '',
+    }));
+    for (const run of runs) {
+      for (const [position, request] of run.requests.entries()) {
+        const sourceItem = run.value?.items?.[position];
+        if (!sourceItem) continue;
+        items[request.globalIndex] = {
+          ...sourceItem,
+          prompt: request.prompt,
+          taskId: sourceItem.taskId || null,
+        };
+      }
+    }
+    const state = runs.some(run => run.value?.state !== 'finished')
+      ? (runs.some(run => run.value?.state === 'canceled') ? 'canceled' : 'interrupted')
+      : 'finished';
+    if (runs.length === 1) {
+      return {
+        outputPath: runs[0].outputPath,
+        sourcePaths: [],
+        value: {
+          ...runs[0].value,
+          items,
+          workspacePath: runs[0].outputPath,
+          sourceBatchIds: [runs[0].value?.id].filter(Boolean),
+        },
+      };
+    }
+
+    const token = mcpBatchToken(Date.now()).split('-').pop() || Date.now().toString(16);
+    const outputPath = project.directory + '/imgs/batches/group-' + token;
+    await api.workspace.mkdir({ path: outputPath });
+    for (const run of runs) {
+      const entries = await api.workspace.list({ path: run.outputPath, recursive: false });
+      const generated = mapGeneratedFiles({ prompts: run.requests.map(item => item.prompt) }, entries);
+      for (const [position, request] of run.requests.entries()) {
+        const sourceItem = run.value?.items?.[position];
+        const entry = generated.find((item: any) => item.batchIndex === position + 1)
+          || entries.find((item: any) => item.kind === 'file' && sourceItem?.output
+            && (item.name === sourceItem.output || item.path.endsWith('/' + sourceItem.output)));
+        if (!entry) continue;
+        const source = await api.workspace.readFile({ path: entry.path });
+        const extension = String(entry.path.split('.').pop() || 'png').toLowerCase();
+        const name = '生成图-' + (request.globalIndex + 1) + '-ai-' + token + '-' + position + '.' + extension;
+        await api.workspace.writeBase64({
+          path: outputPath + '/' + name,
+          data: source.data,
+          mime: source.mime,
+          overwrite: false,
+        });
+      }
+    }
+    return {
+      outputPath,
+      sourcePaths: runs.map(run => run.outputPath),
+      value: {
+        schemaVersion: 1,
+        id: 'grouped-' + token,
+        revision: 1,
+        created: Date.now(),
+        state,
+        workspacePath: outputPath,
+        items,
+        sourceBatchIds: runs.map(run => run.value?.id).filter(Boolean),
+      },
+    };
+  }
+
   async function generate(action: 'new' | 'retry' = 'new') {
     if (!plan || (imageGenerator !== 'mcp' && !modelId)) {
       notify(imageGenerator === 'mcp' ? '请先完成 MCP 生图配置。' : '请选择图片模型。', 'warning');
@@ -1219,7 +1341,7 @@ function ImagesStage({
           argsTemplate: config.mcp_image_args,
           prompts: plan.prompts,
           directory: outputPath,
-          sizeFor: (index: number) => index === 0 ? mcpCoverSize(plan.cover?.aspect || config.cover_aspect) : '16:9',
+          sizeFor: (index: number) => mcpImageSize(targetImageAspect(promptTargets[index] || { kind: 'body', index: -1 })),
           onProgress: (current: number, total: number) => setMessage('正在通过 MCP 生成第 ' + current + '/' + total + ' 张…'),
           signal: controller.signal,
         });
@@ -1318,46 +1440,68 @@ function ImagesStage({
     setMessage('正在提交图片批次…');
     try {
       let value;
+      let outputPath = '';
+      let sourcePaths: string[] = [];
       if (action === 'retry' && batch) {
+        if (String(batch.id || '').startsWith('grouped-')) {
+          setMessage('分组批次不支持整批重试，请使用每张卡片单独重新生成。');
+          return;
+        }
         const retryable = batch.items.some((item: any) => ['failed', 'save-failed'].includes(item.state));
         if (!retryable) {
           setMessage('当前批次没有可重试的失败项。结果未知的图片不会自动重发，请确认后重新生成全部。');
           return;
         }
+        outputPath = batchPath || batch.workspacePath;
         value = await api.ai.batch.start({
           id: batch.id,
           revision: batch.revision,
-          workspacePath: batchPath || batch.workspacePath,
+          workspacePath: outputPath,
           retryFailed: true,
         });
+        setBatch(value);
+        setStatuses(statusMapFromBatch(value));
+        setMessage('正在生成 ' + value.items.length + ' 张图片。失败或未知状态不会自动重发。');
+        value = await waitBatch(value.id);
       } else {
-        const created = await api.ai.batch.create({
-          mode: 'generate',
-          source: imageModelSource(imageModels, modelId),
-          modelId,
-          prompt: plan.prompts[0],
-          items: plan.prompts.map((prompt: string) => ({ prompt })),
-          concurrency: 2,
-        });
-        const outputPath = project.directory + '/imgs/batches/' + created.id;
-        await api.workspace.mkdir({ path: outputPath });
+        setBatch(null);
+        setBatchPath('');
+        const requests: ImageRequest[] = promptTargets.map((target, globalIndex) => ({
+          target,
+          aspect: targetImageAspect(target),
+          prompt: targetPrompt(target),
+          globalIndex,
+        }));
+        const groups = groupImageRequests(requests, targetImageModel());
+        const runs: Array<{ requests: ImageRequest[]; value: any; outputPath: string }> = [];
+        let groupError: unknown = null;
+        for (const [position, group] of groups.entries()) {
+          try {
+            runs.push(await runModelGroup(group, position, groups.length));
+          } catch (error) {
+            groupError = error;
+            break;
+          }
+        }
+        if (!runs.length) throw groupError;
+        const combined = await combineModelGroups(runs, promptTargets.length);
+        value = combined.value;
+        outputPath = combined.outputPath;
+        sourcePaths = combined.sourcePaths;
+        setBatch(value);
+        setStatuses(statusMapFromBatch(value));
         setBatchPath(outputPath);
-        value = await api.ai.batch.start({
-          id: created.id,
-          revision: created.revision,
-          workspacePath: outputPath,
-        });
+        if (groupError) notify(errorText(groupError) + ' 已保留前面分组的生成结果。', 'danger');
       }
-      setBatch(value);
-      setStatuses(statusMapFromBatch(value));
-      if (value.workspacePath) setBatchPath(value.workspacePath);
-      setMessage('正在生成 ' + value.items.length + ' 张图片。失败或未知状态不会自动重发。');
-      value = await waitBatch(value.id);
+      if (value.workspacePath) {
+        outputPath = value.workspacePath;
+        setBatchPath(value.workspacePath);
+      }
       if (value.state !== 'finished') {
         setMessage(value.state === 'interrupted' ? '生成被中断。请检查逐项状态后明确选择重试。' : '生成已结束。');
         return;
       }
-      const result = await applyBatch(value, value.workspacePath || batchPath);
+      const result = await applyBatch(value, outputPath);
       const retryable = value.items.some((item: any) => ['failed', 'save-failed'].includes(item.state));
       const unknown = value.items.some((item: any) => item.state === 'unknown');
       if (result.missing || retryable || unknown) {
@@ -1369,7 +1513,8 @@ function ImagesStage({
         setMessage(notes.join('；') + '。已保留占位符，请确认后重试或重新生成。');
         notify(notes.join('；') + '。', 'warning');
       } else {
-        await api.workspace.remove({ path: value.workspacePath || batchPath, recursive: true }).catch(() => {});
+        await api.workspace.remove({ path: outputPath, recursive: true }).catch(() => {});
+        for (const path of sourcePaths) await api.workspace.remove({ path, recursive: true }).catch(() => {});
         notify('图片已整理完成。请逐张检查中文和信息位内容。', 'success');
       }
     } catch (error) {
@@ -1423,7 +1568,7 @@ function ImagesStage({
           argsTemplate: config.mcp_image_args,
           prompts: [prompt],
           directory: outputPath,
-          sizeFor: () => target.kind === 'cover' ? mcpCoverSize(plan.cover?.aspect || config.cover_aspect) : '16:9',
+          sizeFor: () => mcpImageSize(targetImageAspect(target)),
           signal: controller.signal,
         });
         if (result.fatal) {
@@ -1457,6 +1602,7 @@ function ImagesStage({
           throw new Error(result.failures[0]?.error || 'MCP 没有生成可用图片。');
         }
       } else {
+        const parameters = imageParametersForModel(targetImageModel(), targetImageAspect(target));
         const created = await api.ai.batch.create({
           mode: 'generate',
           source: imageModelSource(imageModels, modelId),
@@ -1464,6 +1610,7 @@ function ImagesStage({
           prompt,
           items: [{ prompt }],
           concurrency: 1,
+          ...(Object.keys(parameters).length ? { parameters } : {}),
         });
         outputPath = project.directory + '/imgs/batches/' + created.id;
         await api.workspace.mkdir({ path: outputPath });
@@ -1559,7 +1706,7 @@ function ImagesStage({
       const token = shortId(String(Date.now()));
       const cover235 = await cropImageBytes(sourceBytes, source.mime, '2.35:1', 0.9);
       const cover11 = await cropImageBytes(sourceBytes, source.mime, '1:1', 0.9);
-      const cover = await cropImageBytes(sourceBytes, source.mime, String(config.cover_aspect || '2.35:1'), 0.9);
+      const cover = await fitImageBytes(sourceBytes, source.mime, targetImageAspect({ kind: 'cover' }), 0.9);
       const coverPath = project.directory + '/cover-user-' + token + '.jpg';
       const cover235Path = project.directory + '/cover-235-user-' + token + '.jpg';
       const cover11Path = project.directory + '/cover-11-user-' + token + '.jpg';
@@ -1630,7 +1777,7 @@ function ImagesStage({
         sourceFiles.push(sourcePath);
         await api.workspace.writeFile({ path: sourcePath, token: file.token, overwrite: false });
         const source = await api.workspace.readFile({ path: sourcePath });
-        const compressed = await compressBodyImageBytes(base64Bytes(source.data), source.mime);
+        const compressed = await compressBodyImageBytes(base64Bytes(source.data), source.mime, String(item.aspect || config.article_image_aspect || '3:4'));
         const target = project.directory + '/imgs/body-' + String(index + 1).padStart(2, '0') + '-user-' + token + '.jpg';
         await api.workspace.writeBase64({ path: target, data: bytesBase64(compressed), mime: 'image/jpeg', overwrite: false });
         createdFiles.push(target);
@@ -1695,8 +1842,8 @@ function ImagesStage({
       if (coverEntry) {
         const coverFile = await api.workspace.readFile({ path: coverEntry.path });
         const coverBytes = base64Bytes(coverFile.data);
-        const coverAspect = String(config.cover_aspect || '2.35:1');
-        const coverBytesJpeg = await cropImageBytes(coverBytes, coverFile.mime, coverAspect, 0.9);
+        const coverAspect = targetImageAspect({ kind: 'cover' });
+        const coverBytesJpeg = await fitImageBytes(coverBytes, coverFile.mime, coverAspect, 0.9);
         coverPath = project.directory + '/cover-' + token + '.jpg';
         await api.workspace.writeBase64({ path: coverPath, data: bytesBase64(coverBytesJpeg), mime: 'image/jpeg', overwrite: false });
         createdFiles.push(coverPath);
@@ -1714,7 +1861,11 @@ function ImagesStage({
         const entry = generated.find((candidate: any) => candidate.batchIndex === index + 2);
         if (!entry) continue;
         const bodyFile = await api.workspace.readFile({ path: entry.path });
-        const compressed = await compressBodyImageBytes(base64Bytes(bodyFile.data), bodyFile.mime);
+        const compressed = await compressBodyImageBytes(
+          base64Bytes(bodyFile.data),
+          bodyFile.mime,
+          String(item.aspect || config.article_image_aspect || '3:4'),
+        );
         const target = project.directory + '/imgs/body-' + String(index + 1).padStart(2, '0') + '-' + token + '.jpg';
         await api.workspace.writeBase64({ path: target, data: bytesBase64(compressed), mime: 'image/jpeg', overwrite: false });
         createdFiles.push(target);
@@ -1725,7 +1876,16 @@ function ImagesStage({
       const rendered = await renderArticle(rewritten);
       await api.workspace.writeText({ path: project.directory + '/article.md', text: rewritten, overwrite: true });
       await api.workspace.writeText({ path: project.directory + '/article.html', text: rendered.html, overwrite: true });
-      await api.workspace.writeText({ path: project.directory + '/img-plan.json', text: JSON.stringify({ ...plan, generated: mapping, batchId: value.id }, null, 2), overwrite: true });
+      await api.workspace.writeText({
+        path: project.directory + '/img-plan.json',
+        text: JSON.stringify({
+          ...plan,
+          generated: mapping,
+          batchId: value.id,
+          ...(value.sourceBatchIds?.length ? { sourceBatchIds: value.sourceBatchIds } : {}),
+        }, null, 2),
+        overwrite: true,
+      });
       await saveArticle(api, project.directory, {
         ...(coverPath ? {
           cover_image: coverPath.slice(project.directory.length + 1),
@@ -1757,7 +1917,9 @@ function ImagesStage({
     return { missing };
   }
 
-  const retryable = batch?.items?.filter((item: any) => ['failed', 'save-failed'].includes(item.state)) || [];
+  const retryable = String(batch?.id || '').startsWith('grouped-')
+    ? []
+    : batch?.items?.filter((item: any) => ['failed', 'save-failed'].includes(item.state)) || [];
   const unknown = batch?.items?.filter((item: any) => item.state === 'unknown') || [];
   const unknownCount = Object.values(statuses).filter(item => item.state === 'unknown').length || unknown.length;
   const pendingSlots = (plan?.items || []).filter((item: any) => /^placeholder(?:-|$)/i.test(String(item.src || '')));
@@ -1832,7 +1994,7 @@ function ImagesStage({
               {coverHasMedia ? (
                 <div className="plan-card-media">
                   <TargetStatusBadge status={statuses[imageTargetKey(coverTarget)]} hasImage={Boolean(coverPreview)} generated={Boolean(plan.cover.generate)} />
-                  <PlanThumb image={coverPreview} onOpen={openPreview} />
+                  <PlanThumb image={coverPreview} aspect={plan.cover.aspect} onOpen={openPreview} />
                   {plan.cover.generate ? (
                     <Button
                       type="button"
@@ -1868,13 +2030,13 @@ function ImagesStage({
                       {/^placeholder(?:-|$)/i.test(String(item.src || '')) ? <Badge tone="warning">待补图</Badge> : null}
                     </span>
                     <strong>{item.alt}</strong>
-                    <p>{item.generate ? (image ? '已生成，可单独重做' : '将生成') : (image ? '已导入你提供的图片' : '需要你提供真实截图或照片')}</p>
+                    <p>{item.generate ? (image ? '已生成，可单独重做' : '将生成') : (image ? '已导入你提供的图片' : '需要你提供真实截图或照片')} · {item.aspect}</p>
                     <details><summary>提示词</summary><pre>{item.prompt}</pre></details>
                   </div>
                   {hasMedia ? (
                     <div className="plan-card-media">
                       <TargetStatusBadge status={statuses[key]} hasImage={Boolean(image)} generated={Boolean(item.generate)} />
-                      <PlanThumb image={image} onOpen={openPreview} />
+                      <PlanThumb image={image} aspect={item.aspect} onOpen={openPreview} />
                       {item.generate ? (
                         <Button
                           type="button"
@@ -1928,7 +2090,7 @@ function ImagesStage({
         )}
       </div>
       {imageSource === 'user' ? <div className="notice info">本篇使用你提供的图片，不会调用生图模型。封面先导入一张，正文图片按图位顺序批量导入。</div> : null}
-      {imageSource !== 'user' ? <div className="notice info">每张卡片都可以单独生成或重做，只调用该图，不会重发其他成功项。</div> : null}
+      {imageSource !== 'user' ? <div className="notice info">每张卡片都可以单独生成或重做，只调用该图，不会重发其他成功项。模型无法精确匹配画布比例时会完整保留画面并补齐边距，不再中心裁切。</div> : null}
       {unknownCount ? <div className="notice warning">有 {unknownCount} 张图结果未知，不会自动重发。请先检查宿主后台任务（MCP 模式的记录在批次目录 mcp-generation.json），再在对应卡片单独生成。</div> : null}
       <div className="toolbar toolbar-end">
         <Button type="button" onClick={() => void saveAndContinue(false)} disabled={busy}>仅保存状态</Button>
@@ -1943,7 +2105,7 @@ function ImagesStage({
   );
 }
 
-function PlanThumb({ image, onOpen }: { image: PreviewImage | null; onOpen: (image: PreviewImage) => void }) {
+function PlanThumb({ image, aspect, onOpen }: { image: PreviewImage | null; aspect: string; onOpen: (image: PreviewImage) => void }) {
   const [url, setUrl] = useState('');
   useEffect(() => {
     let cancelled = false;
@@ -1963,12 +2125,13 @@ function PlanThumb({ image, onOpen }: { image: PreviewImage | null; onOpen: (ima
     };
   }, [image?.path]);
   if (!image) {
-    return <div className="plan-thumb-empty" aria-label="还没有生成图片">图</div>;
+    return <div className="plan-thumb-empty" style={{ aspectRatio: aspectCss(aspect) }} aria-label="还没有生成图片">图</div>;
   }
   return (
     <button
       type="button"
       className="plan-thumb"
+      style={{ aspectRatio: aspectCss(aspect) }}
       onClick={() => onOpen(image)}
       title="点击查看大图"
       aria-label={'查看' + image.title + '大图'}

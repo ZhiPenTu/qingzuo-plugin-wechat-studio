@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { api, csv, errorText, parseCsv } from './client';
 import { Badge, Button, Field, Modal } from './common';
-import { DEFAULT_CONFIG, deepMerge, serializeConfig, splitSummarySetting, validateConfig } from '../lib/config.mjs';
+import { DEFAULT_CONFIG, IMAGE_ASPECTS, deepMerge, serializeConfig, splitSummarySetting, validateConfig } from '../lib/config.mjs';
 import { exportBundle, saveBundle } from '../lib/bundle.mjs';
 import type { ImageModel, McpServer, McpTool, TextModel, Toast, WechatAccount } from './types';
 import { imageModelLabel } from '../lib/image-models.mjs';
@@ -18,6 +18,15 @@ const STEPS = [
   ['visual', '视觉呈现'],
   ['publish', '发布设置'],
 ] as const;
+
+const ASPECT_LABELS: Record<string, string> = {
+  '3:4': '3:4 · 竖版（推荐）',
+  '4:3': '4:3 · 横版',
+  '16:9': '16:9 · 横版',
+  '1:1': '1:1 · 方形',
+  '1.91:1': '1.91:1 · 横版',
+  '2.35:1': '2.35:1 · 宽银幕',
+};
 
 function configDraft(config: Record<string, any>) {
   const base = { ...DEFAULT_CONFIG, ...config };
@@ -447,8 +456,13 @@ export function ConfigPage({
                   </select>
                 </Field>
                 <Field label="封面比例">
-                  <select value={draft.cover_aspect || '2.35:1'} onChange={event => update('cover_aspect', event.target.value)}>
-                    {['2.35:1', '16:9', '1:1', '1.91:1'].map(value => <option key={value}>{value}</option>)}
+                  <select value={draft.cover_aspect || DEFAULT_CONFIG.cover_aspect} onChange={event => update('cover_aspect', event.target.value)}>
+                    {IMAGE_ASPECTS.map(value => <option key={value} value={value}>{ASPECT_LABELS[value] || value}</option>)}
+                  </select>
+                </Field>
+                <Field label="正文配图比例" hint="生成和写入文章时都会保留完整画面，不裁切主体或文字。">
+                  <select value={draft.article_image_aspect || DEFAULT_CONFIG.article_image_aspect} onChange={event => update('article_image_aspect', event.target.value)}>
+                    {IMAGE_ASPECTS.map(value => <option key={value} value={value}>{ASPECT_LABELS[value] || value}</option>)}
                   </select>
                 </Field>
                 <Field label="封面形态"><input value={csv(draft.custom_cover_image_style)} onChange={event => update('custom_cover_image_style', parseCsv(event.target.value))} placeholder="留空则由文章内容自动选择" /></Field>

@@ -59,6 +59,22 @@ test('cover images join the article body once a real image is available', () => 
   assert.match(placeholder.html, /稍后补图/);
 });
 
+test('body images override theme crops and keep the complete frame', () => {
+  const rendered = renderMarkdown('![信息图：完整流程](imgs/body.jpg)', {
+    styles: { img: 'width:100%; aspect-ratio:16/9; object-fit:cover;' },
+  });
+  assert.match(rendered.html, /aspect-ratio:auto/);
+  assert.match(rendered.html, /object-fit:contain/);
+  assert.match(rendered.html, /height:auto/);
+
+  const inline = renderMarkdown('正文中插入 ![步骤](imgs/inline.jpg) 继续说明。', {
+    styles: { img: 'aspect-ratio:16/9; object-fit:cover;' },
+  });
+  assert.match(inline.html, /<img src="imgs\/inline\.jpg"/);
+  assert.match(inline.html, /aspect-ratio:auto/);
+  assert.match(inline.html, /object-fit:contain/);
+});
+
 test('embed links use the same safe URL policy', () => {
   const embeds = {
     related_articles: { manual: [{ name: '危险', url: '//evil.example/a' }] },

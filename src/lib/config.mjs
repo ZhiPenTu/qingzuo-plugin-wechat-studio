@@ -12,6 +12,8 @@ export const PRESET_FIELDS = [
   'sticker_style',
 ];
 
+export const IMAGE_ASPECTS = ['3:4', '4:3', '16:9', '1:1', '1.91:1', '2.35:1'];
+
 export const DEFAULT_CONFIG = {
   article_category: '',
   target_reader: '',
@@ -52,7 +54,8 @@ export const DEFAULT_CONFIG = {
   mcp_image_server: '',
   mcp_image_tool: '',
   mcp_image_args: DEFAULT_MCP_IMAGE_ARGS,
-  cover_aspect: '2.35:1',
+  cover_aspect: '3:4',
+  article_image_aspect: '3:4',
   cover_style: '简约',
   image_density: '每节一图',
   caption_style: '有图注',
@@ -229,7 +232,8 @@ export function validateConfig(config) {
       errors.push(error instanceof Error ? error.message : 'MCP 工具参数模板无效。');
     }
   }
-  if (!['2.35:1', '16:9', '1:1', '1.91:1'].includes(value.cover_aspect)) errors.push('封面比例无效。');
+  if (!IMAGE_ASPECTS.includes(value.cover_aspect)) errors.push('封面比例无效。');
+  if (!IMAGE_ASPECTS.includes(value.article_image_aspect)) errors.push('正文配图比例无效。');
   if (!['有图注', '无图注', '关键图有'].includes(value.caption_style)) errors.push('图注规则无效。');
   if (!['draft', 'published', 'none'].includes(value.publish_method)) errors.push('发布方式无效。');
   if (!Array.isArray(value.review_required)) errors.push('审稿规则必须是列表。');

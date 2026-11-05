@@ -27,11 +27,33 @@ export const MEDIA_DESCRIPTIONS = {
 };
 
 export const ASPECT_SIZES = {
+  '3:4': { width: 900, height: 1200 },
+  '4:3': { width: 1200, height: 900 },
   '2.35:1': { width: 900, height: 383 },
   '16:9': { width: 1080, height: 608 },
   '1:1': { width: 1080, height: 1080 },
   '1.91:1': { width: 900, height: 471 },
 };
+
+const ASPECT_LABELS = {
+  '3:4': '竖版 3:4',
+  '4:3': '横版 4:3',
+  '16:9': '横版 16:9',
+  '1:1': '方形 1:1',
+  '1.91:1': '横版 1.91:1',
+  '2.35:1': '宽银幕 2.35:1',
+};
+
+export function aspectDescription(aspect) {
+  const value = ASPECT_SIZES[aspect] ? String(aspect) : '3:4';
+  return ASPECT_LABELS[value] + '（宽高比 ' + value + '）';
+}
+
+export function compositionSafety(aspect) {
+  return '按 ' + aspectDescription(aspect) +
+    ' 的完整画布构图，四周至少预留 6% 安全边距；标题、数字、人物、产品、箭头和说明文字必须完整显示，' +
+    '不得贴边或被裁切。不要把关键内容放到画面边缘，也不要生成需要二次裁切才能看全的构图。';
+}
 
 const COVER_RULES = {
   数字冲击: /^\s*\d|[\d.]+\s*(?:%|万|亿|倍|个)/,
@@ -112,9 +134,9 @@ function coverCopy(title) {
   return [...selected].slice(0, 7).join('');
 }
 
-function coverDescription(style, title, config) {
+function coverDescription(style, title, config, aspect) {
   const hook = coverCopy(title);
-  const common = '请直接生成一张微信公众号信息流封面。不要出现机器人、发光大脑、电路脑、机械手、灯泡或二进制雨。';
+  const common = '请直接生成一张微信公众号信息流封面，' + aspectDescription(aspect) + '。不要出现机器人、发光大脑、电路脑、机械手、灯泡或二进制雨。';
   const specs = {
     信息表: '用清晰的表格或三栏信息卡呈现主题，中文标题「' + hook + '」，主体占画面三分之二，文字可读。',
     对比式: '左右并置同一对象的前后两种状态，用相同构图只改变状态，中文短句「' + hook + '」，对比明确。',
@@ -129,12 +151,13 @@ function coverDescription(style, title, config) {
     产品实拍: '单一产品放在真实台面上，柔和侧光，材质清楚，除产品外最多一个辅助物件。',
     剧照氛围: '像电影剧照一样的单一场景，强方向光、空气感与留白，默认不加字。',
   };
-  return common + '\n' + specs[style] + '\n风格：' + (config.cover_style || '简约') + '。画面元素不超过 3 个。';
+  return common + '\n' + specs[style] + '\n风格：' + (config.cover_style || '简约') + '。画面元素不超过 3 个。\n' +
+    compositionSafety(aspect);
 }
 
-function bodyDescription(style, slot, medium) {
+function bodyDescription(style, slot, medium, aspect) {
   const content = slot.description || slot.alt;
-  const base = '正文配图，16:9。必须使用文章里的真实内容，不得自行编造步骤、数字或结论。' +
+  const base = '正文配图，' + aspectDescription(aspect) + '。必须使用文章里的真实内容，不得自行编造步骤、数字或结论。' +
     '媒介：' + medium + '。' + MEDIA_DESCRIPTIONS[medium] + '。';
   const specs = {
     实证: '保留真实截图或照片的拍摄需求：' + content + '。不得生成伪造证据。',
@@ -147,7 +170,8 @@ function bodyDescription(style, slot, medium) {
     场景还原: '还原一个读者能代入的具体使用场景：' + content + '。不要加说明文字。',
     金句卡片: '只呈现文章中的这句金句：' + content + '。整张画面除这句话和短出处外没有别的文字。',
   };
-  return base + '\n' + specs[style] + '\n画面中除上述必要文字外不出现 emoji、英文标签或解释小字。';
+  return base + '\n' + specs[style] + '\n画面中除上述必要文字外不出现 emoji、英文标签或解释小字。\n' +
+    compositionSafety(aspect);
 }
 
 export function planImages(markdown, config = {}, article = {}) {
@@ -167,7 +191,8 @@ export function planImages(markdown, config = {}, article = {}) {
     ? chosenCover
     : coverCandidates[0] || chooseCoverStyle(title, source);
   const medium = chooseMedium(merged, article, source);
-  const coverAspect = String(merged.cover_aspect || '2.35:1');
+  const coverAspect = String(merged.cover_aspect || '3:4');
+  const bodyAspect = String(merged.article_image_aspect || '3:4');
   const imageSource = String(article.image_source || merged.image_source || 'generated');
   const bodyCandidates = normalizePresetList(
     merged.resolved_article_image_style?.length
@@ -182,7 +207,12 @@ export function planImages(markdown, config = {}, article = {}) {
     style: COVER_STYLES.includes(coverStyle) ? coverStyle : chooseCoverStyle(title, source),
     aspect: coverAspect,
     copy: coverCopy(title),
-    prompt: coverDescription(COVER_STYLES.includes(coverStyle) ? coverStyle : chooseCoverStyle(title, source), title, config),
+    prompt: coverDescription(
+      COVER_STYLES.includes(coverStyle) ? coverStyle : chooseCoverStyle(title, source),
+      title,
+      merged,
+      coverAspect,
+    ),
     file: 'imgs/cover-raw.png',
     generate: imageSource !== 'user',
   };
@@ -196,10 +226,11 @@ export function planImages(markdown, config = {}, article = {}) {
       type: slot.type,
       caption: slot.caption,
       style,
+      aspect: bodyAspect,
       role: ['流程步骤', '结构分层', '数据图表', '对比两栏', '清单要点', '实证'].includes(style) ? '信息位' : '节奏位',
       generate: imageSource !== 'user' && style !== '实证',
       file: 'imgs/body-' + String(index + 1).padStart(2, '0') + '.png',
-      prompt: bodyDescription(style, slot, medium),
+      prompt: bodyDescription(style, slot, medium, bodyAspect),
     };
   });
   const prompts = [...(cover.generate ? [cover.prompt] : []), ...items.filter(item => item.generate).map(item => item.prompt)];
@@ -326,5 +357,5 @@ export function mapGeneratedFiles(plan, entries) {
 }
 
 export function targetImageSize(aspect) {
-  return ASPECT_SIZES[aspect] || ASPECT_SIZES['2.35:1'];
+  return ASPECT_SIZES[aspect] || ASPECT_SIZES['3:4'];
 }

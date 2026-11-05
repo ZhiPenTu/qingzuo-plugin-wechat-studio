@@ -347,8 +347,15 @@ export function mcpBatchToken(now = Date.now()) {
   return String(now) + '-' + hexToken(8);
 }
 
+export function mcpImageSize(aspect) {
+  const value = String(aspect || '').trim();
+  if (value === '3:4' || value === '4:3' || value === '1:1' || value === '16:9') return value;
+  if (value === '1.91:1' || value === '2.35:1') return '16:9';
+  return '3:4';
+}
+
 export function mcpCoverSize(aspect) {
-  return String(aspect || '').trim() === '1:1' ? '1:1' : '16:9';
+  return mcpImageSize(aspect);
 }
 
 /**
