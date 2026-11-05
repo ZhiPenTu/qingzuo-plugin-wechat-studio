@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import YAML from 'yaml';
 import {
   DEFAULT_CONFIG,
+  IMAGE_ASPECTS,
   deepMerge,
   mergedConfig,
   normalizeConfigForSave,
@@ -21,6 +22,16 @@ test('config precedence is article > custom > default', () => {
   assert.equal(resolvePreset(config, { default_format_preset: ['杂志'] }, 'format_preset')[0], '杂志');
   assert.equal(resolvePreset(config, {}, 'format_preset')[0], '书卷');
   assert.equal(resolvePreset({ default_format_preset: ['资讯'] }, {}, 'format_preset')[0], '资讯');
+});
+
+test('image aspect defaults favor complete 3:4 layouts', () => {
+  assert.equal(DEFAULT_CONFIG.cover_aspect, '3:4');
+  assert.equal(DEFAULT_CONFIG.article_image_aspect, '3:4');
+  assert.equal(IMAGE_ASPECTS.includes('3:4'), true);
+  assert.deepEqual(validateConfig({
+    cover_aspect: '3:4',
+    article_image_aspect: '3:4',
+  }), []);
 });
 
 test('format options preserve article overrides and inherit config defaults', () => {
@@ -83,7 +94,8 @@ test('config validation reports actionable invalid values', () => {
     title_max_length: 0,
     summary_length: 'long',
     image_source: 'remote',
-    cover_aspect: '4:3',
+    cover_aspect: '5:4',
+    article_image_aspect: '2:3',
     caption_style: '有',
     publish_method: 'now',
     drafts_root: '../outside',
@@ -93,6 +105,7 @@ test('config validation reports actionable invalid values', () => {
   assert.ok(errors.some(message => message.includes('摘要')));
   assert.ok(errors.some(message => message.includes('图片来源')));
   assert.ok(errors.some(message => message.includes('封面比例')));
+  assert.ok(errors.some(message => message.includes('正文配图比例')));
   assert.ok(errors.some(message => message.includes('图注')));
   assert.ok(errors.some(message => message.includes('发布方式')));
   assert.ok(errors.some(message => message.includes('草稿目录')));

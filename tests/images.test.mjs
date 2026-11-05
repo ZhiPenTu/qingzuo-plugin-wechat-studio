@@ -13,7 +13,7 @@ import {
   rewriteImageMarkersWithMapping,
   targetImageSize,
 } from '../src/lib/images.mjs';
-import { centerCropRect } from '../src/lib/crop.mjs';
+import { centerCropRect, containRect } from '../src/lib/crop.mjs';
 
 test('image catalogs expose twelve covers, eight bodies and eight media', () => {
   assert.equal(COVER_STYLES.length, 12);
@@ -49,14 +49,35 @@ const article = `# 配置一次，规矩自动加载
 `;
 
 test('image plan separates cover and body slots with real content prompts', () => {
-  const plan = planImages(article, { cover_aspect: '2.35:1', image_density: '每节一图' }, {});
+  const plan = planImages(article, {
+    cover_aspect: '3:4',
+    article_image_aspect: '3:4',
+    image_density: '每节一图',
+  }, {});
   assert.equal(plan.cover.style, '截图标注');
+  assert.equal(plan.cover.aspect, '3:4');
   assert.equal(plan.items.length, 2);
   assert.equal(plan.items[0].style, '流程步骤');
+  assert.equal(plan.items[0].aspect, '3:4');
   assert.equal(plan.items[0].role, '信息位');
   assert.equal(plan.items[0].src, 'placeholder');
   assert.equal(plan.items[1].role, '节奏位');
   assert.equal(plan.prompts.length, 3);
+  assert.match(plan.cover.prompt, /竖版 3:4/);
+  assert.match(plan.cover.prompt, /6% 安全边距/);
+  assert.match(plan.items[0].prompt, /竖版 3:4/);
+  assert.match(plan.items[0].prompt, /不得贴边或被裁切/);
+});
+
+test('cover and body aspect ratios can be configured independently', () => {
+  const plan = planImages(article, {
+    cover_aspect: '4:3',
+    article_image_aspect: '3:4',
+  }, {});
+  assert.equal(plan.cover.aspect, '4:3');
+  assert.equal(plan.items.every(item => item.aspect === '3:4'), true);
+  assert.match(plan.cover.prompt, /横版 4:3/);
+  assert.match(plan.items[0].prompt, /竖版 3:4/);
 });
 
 test('image plan honors configured cover and body style candidates', () => {
@@ -192,7 +213,9 @@ test('generated outputs map in batch index order and crop centers', () => {
     'imgs/生成图-4-ai-abcdef12-4.gif',
   ]);
   assert.deepEqual(centerCropRect(1000, 1000, 900, 383), { x: 0, y: 287, width: 1000, height: 426 });
-  assert.deepEqual(targetImageSize('2.35:1'), { width: 900, height: 383 });
+  assert.deepEqual(containRect(1000, 1000, 900, 1200), { x: 0, y: 150, width: 900, height: 900 });
+  assert.deepEqual(targetImageSize('3:4'), { width: 900, height: 1200 });
+  assert.deepEqual(targetImageSize('unsupported'), { width: 900, height: 1200 });
 });
 
 test('partial generation keeps stable batch indexes instead of shifting later images', () => {

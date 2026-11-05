@@ -102,6 +102,11 @@ function imageDims() {
   return '';
 }
 
+function completeImageStyle(styles = {}) {
+  return (styles.img || 'max-width:100%; border-radius:4px;') +
+    '; max-width:100%; height:auto; aspect-ratio:auto; object-fit:contain;';
+}
+
 function safeHref(value, image = false) {
   const text = String(value || '').trim();
   if (!text || /[\u0000-\u001f]/.test(text)) return '';
@@ -269,7 +274,7 @@ function inlineFormat(text, styles) {
     const target = safeHref(href, Boolean(bang));
     if (!target) return escapeHtml(label);
     const html = bang
-      ? '<img src="' + escapeAttr(target) + '" alt="' + escapeAttr(label) + '"' + (title ? ' title="' + escapeAttr(title) + '"' : '') + ' style="' + escapeAttr(styles.img || '') + '" />'
+      ? '<img src="' + escapeAttr(target) + '" alt="' + escapeAttr(label) + '"' + (title ? ' title="' + escapeAttr(title) + '"' : '') + ' style="' + escapeAttr(completeImageStyle(styles)) + '" />'
       : '<a href="' + escapeAttr(target) + '" style="' + escapeAttr(styles.a || '') + '"' + (title ? ' title="' + escapeAttr(title) + '"' : '') + '>' + escapeHtml(label) + '</a>';
     protectedParts.push(html);
     return '\u0001' + (protectedParts.length - 1) + '\u0001';
@@ -593,9 +598,7 @@ export function renderMarkdown(markdown, options = {}) {
       const caption = (image[3] || '').trim();
       const cover = isCoverImageAlt(alt);
       if (cover && /^placeholder(?:-|$)/i.test(src)) continue;
-      const imageStyle = cover
-        ? (styles.img || 'max-width:100%; border-radius:4px;') + '; height:auto; aspect-ratio:auto;'
-        : (styles.img || 'max-width:100%; border-radius:4px;');
+      const imageStyle = completeImageStyle(styles);
       let imageHtml = '<p style="text-align:center; margin:1.5em 0;"><img src="' + escapeAttr(safeSource) + '"' + imageDims(safeSource) +
         ' alt="' + escapeAttr(alt) + '" style="' + escapeAttr(imageStyle) + '" /></p>';
       if (components['img-deco']?.template) imageHtml = substituteTheme(components['img-deco'].template, styles).replace('{content}', imageHtml);

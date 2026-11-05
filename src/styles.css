@@ -308,11 +308,10 @@ input::placeholder, textarea::placeholder { color: var(--qz-text-muted); opacity
 .plan-card-body, .plan-card-media { display: grid; gap: 7px; align-content: start; min-width: 0; }
 .plan-card-media { justify-items: stretch; }
 .plan-card-media .button { width: 100%; min-height: 30px; padding-inline: 8px; font-size: 11.5px; }
-.plan-thumb { display: block; width: 100%; padding: 0; border: 1px solid var(--qz-border); border-radius: 7px; overflow: hidden; background: var(--qz-surface-subtle); aspect-ratio: 16/9; cursor: zoom-in; }
-.plan-thumb img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.plan-thumb { display: block; width: 100%; padding: 0; border: 1px solid var(--qz-border); border-radius: 7px; overflow: hidden; background: var(--qz-surface-subtle); aspect-ratio: 3/4; cursor: zoom-in; }
+.plan-thumb img { display: block; width: 100%; height: 100%; object-fit: contain; }
 .plan-thumb .image-placeholder { height: 100%; aspect-ratio: auto; }
-.plan-thumb-empty { display: grid; place-items: center; width: 100%; aspect-ratio: 16/9; border: 1px dashed color-mix(in srgb, var(--qz-border) 75%, var(--qz-text-muted)); border-radius: 7px; color: var(--qz-text-muted); background: var(--qz-surface-subtle); font-size: 12px; }
-.cover-plan .plan-thumb, .cover-plan .plan-thumb-empty { aspect-ratio: 2.35/1; }
+.plan-thumb-empty { display: grid; place-items: center; width: 100%; aspect-ratio: 3/4; border: 1px dashed color-mix(in srgb, var(--qz-border) 75%, var(--qz-text-muted)); border-radius: 7px; color: var(--qz-text-muted); background: var(--qz-surface-subtle); font-size: 12px; }
 .plan-card-media .badge { justify-self: start; }
 .plan-card-source-note { color: var(--qz-text-muted); font-size: 10.5px; }
 .plan-card-error { color: var(--qz-danger); font-size: 10.5px; line-height: 1.45; overflow: hidden; word-break: break-word; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; }
