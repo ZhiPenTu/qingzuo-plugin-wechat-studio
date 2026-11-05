@@ -56,6 +56,21 @@ function imageTargetKey(target: ImageTarget) {
   return target.kind === 'cover' ? 'cover' : 'body:' + target.index;
 }
 
+function previewDocument(html: string) {
+  return [
+    '<!doctype html><html><head><meta charset="utf-8">',
+    '<meta name="viewport" content="width=device-width, initial-scale=1">',
+    '<style>',
+    'html,body{margin:0;padding:0;background:#fff;}',
+    'body{padding:20px 18px 44px;-webkit-text-size-adjust:100%;}',
+    'img{max-width:100%;height:auto;}',
+    'a{overflow-wrap:anywhere;}',
+    '</style></head><body>',
+    html,
+    '</body></html>',
+  ].join('');
+}
+
 const STAGE_LABELS: Record<string, string> = {
   topic: '选题', research: '调研', writing: '写稿', review: '内容审',
   format: '排版', images: '配图', final: '终审', publish: '草稿/发布',
@@ -894,7 +909,7 @@ function FormatStage({
         </div>
         <div className="phone-preview">
           <div className="phone-top" aria-hidden="true" />
-          {previewHtml ? <iframe title="公众号手机预览" srcDoc={previewHtml} sandbox="" /> : <div className="preview-empty">更新预览后在这里检查手机排版。</div>}
+          {previewHtml ? <iframe title="公众号手机预览" srcDoc={previewDocument(previewHtml)} sandbox="" /> : <div className="preview-empty">更新预览后在这里检查手机排版。</div>}
         </div>
       </div>
       {warnings.length ? <div className="notice warning">{warnings.map(item => <p key={item}>{item}</p>)}</div> : null}
