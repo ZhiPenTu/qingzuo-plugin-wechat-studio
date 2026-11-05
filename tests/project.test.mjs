@@ -4,6 +4,7 @@ import {
   articleDirectoryName,
   createProject,
   dateStamp,
+  deleteProjectDirectory,
   listProjects,
   loadProject,
   nextStage,
@@ -17,6 +18,7 @@ import {
 function memoryApi() {
   const files = new Map();
   const directories = new Set(['drafts']);
+  const state = { failRemove: '', partialRemove: '' };
   const workspace = {
     async mkdir({ path }) {
       const parts = path.split('/');
@@ -51,8 +53,42 @@ function memoryApi() {
       }
       return [...children.values()];
     },
+    async rename({ from, to }) {
+      if (!directories.has(from) && !files.has(from)) throw new Error('文件不存在。');
+      const rewrite = value => value === from || value.startsWith(from + '/')
+        ? to + value.slice(from.length)
+        : value;
+      for (const directory of [...directories]) {
+        if (directory === from || directory.startsWith(from + '/')) {
+          directories.delete(directory);
+          directories.add(rewrite(directory));
+        }
+      }
+      for (const file of [...files.keys()]) {
+        if (file === from || file.startsWith(from + '/')) {
+          const text = files.get(file);
+          files.delete(file);
+          files.set(rewrite(file), text);
+        }
+      }
+    },
+    async remove({ path, recursive = false }) {
+      if (state.failRemove && path.startsWith(state.failRemove)) throw new Error('模拟删除失败。');
+      const children = [...directories].filter(directory => directory.startsWith(path + '/'));
+      if (children.length && !recursive) throw new Error('目录不为空。');
+      if (state.partialRemove && path.startsWith(state.partialRemove)) {
+        const file = [...files.keys()].find(value => value.startsWith(path + '/'));
+        if (file) files.delete(file);
+        throw new Error('模拟部分删除失败。');
+      }
+      for (const directory of children) directories.delete(directory);
+      for (const file of [...files.keys()]) {
+        if (file === path || file.startsWith(path + '/')) files.delete(file);
+      }
+      directories.delete(path);
+    },
   };
-  return { api: { workspace }, files, directories };
+  return { api: { workspace }, files, directories, state };
 }
 
 test('project directory uses date and readable slug', () => {
@@ -75,10 +111,11 @@ test('stage progress marks current and completed', () => {
 });
 
 test('project creation avoids overwrite and starts rewrite work at writing', async () => {
-  const { api, directories } = memoryApi();
+  const { api, directories, files } = memoryApi();
   directories.add('drafts/20261103-demo');
   const created = await createProject(api, { title: 'Demo', mode: 'rewrite', initialStage: 'writing' }, new Date(2026, 10, 3));
   assert.equal(created.directory, 'drafts/20261103-demo-1');
+  assert.equal(files.has(created.directory + '/.qz-owner'), true);
   const project = await loadProject(api, created.directory);
   assert.equal(project.stage.id, 'writing');
   assert.equal(project.pipeline.mode, 'rewrite');
@@ -151,4 +188,51 @@ test('custom image copies persist across reloads and clean up on reset', async (
   reloaded = await loadProject(api, created.directory);
   assert.equal(reloaded.article.cover_copy, '');
   assert.deepEqual(reloaded.article.body_copies, {});
+});
+
+test('project deletion is scoped and keeps cleanup failures in trash', async () => {
+  const { api, directories, files, state } = memoryApi();
+  directories.add('drafts/20261103-delete');
+  const deleted = await deleteProjectDirectory(api, 'drafts/20261103-delete');
+  assert.equal(deleted.cleaned, true);
+  assert.equal(directories.has('drafts/20261103-delete'), false);
+  await assert.rejects(() => deleteProjectDirectory(api, 'posts/not-a-draft'), /drafts/);
+
+  directories.add('drafts/20261103-restore');
+  state.failRemove = 'drafts/.trash/';
+  const uncleaned = await deleteProjectDirectory(api, 'drafts/20261103-restore');
+  assert.equal(uncleaned.cleaned, false);
+  assert.equal(directories.has('drafts/20261103-restore'), false);
+  assert.match(uncleaned.trashPath, /^drafts\/\.trash\//);
+  assert.equal(directories.has(uncleaned.trashPath), true);
+
+  const partial = 'drafts/20261103-partial';
+  directories.add(partial);
+  files.set(partial + '/article.md', '# Draft');
+  state.failRemove = '';
+  state.partialRemove = 'drafts/.trash/';
+  const partiallyRemoved = await deleteProjectDirectory(api, partial);
+  assert.equal(partiallyRemoved.cleaned, false);
+  assert.equal(directories.has(partial), false);
+  assert.equal(directories.has(partiallyRemoved.trashPath), true);
+  assert.equal(files.has(partiallyRemoved.trashPath + '/article.md'), false);
+});
+
+test('project creation does not remove a directory owned by another creator', async () => {
+  const { api, directories, files } = memoryApi();
+  const occupied = 'drafts/20261103-race-1';
+  directories.add('drafts/20261103-race');
+  directories.add(occupied);
+  files.set(occupied + '/.qz-owner', 'other-creator');
+  const list = api.workspace.list;
+  api.workspace.list = async options => {
+    const entries = await list(options);
+    return options?.path === 'drafts' ? entries.filter(entry => entry.path !== occupied) : entries;
+  };
+  await assert.rejects(
+    () => createProject(api, { title: 'Race', initialStage: 'format' }, new Date(2026, 10, 3)),
+    /文件已存在/,
+  );
+  assert.equal(directories.has(occupied), true);
+  assert.equal(files.get(occupied + '/.qz-owner'), 'other-creator');
 });

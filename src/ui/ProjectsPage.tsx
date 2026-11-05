@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { api, errorText, isMissingError, readOptional, shortId } from './client';
 import { Badge, Button, CopyButton, Empty, Field, Modal, Tabs } from './common';
 import { callWorker } from './worker-client';
@@ -11,7 +11,12 @@ import {
   mergeReviewMarkdown,
   reviewArticle,
 } from '../lib/review.mjs';
-import { buildPublicationGate, hasSavedCover, reviewIssueStage } from '../lib/publication.mjs';
+import {
+  articlePublicationFingerprint,
+  buildPublicationGate,
+  hasSavedCover,
+  reviewIssueStage,
+} from '../lib/publication.mjs';
 import {
   BODY_STYLES,
   COVER_STYLES,
@@ -32,6 +37,7 @@ import { generateImagesThroughMcp, mcpBatchToken, mcpImageSize } from '../lib/mc
 import { resolveFormatOptions } from '../lib/config.mjs';
 import {
   appendLog,
+  deleteProjectDirectory,
   loadProject,
   nextStage,
   previousStage,
@@ -118,6 +124,26 @@ export function ProjectsPage({
   onChanged: () => Promise<void>;
   onGoConfig: () => void;
 }) {
+  const [deleting, setDeleting] = useState('');
+
+  async function deleteProject(item: ProjectSummary) {
+    if (!window.confirm('删除文章项目“' + item.title + '”及其全部文件？此操作不可撤销。')) return;
+    setDeleting(item.directory);
+    try {
+      const result = await deleteProjectDirectory(api, item.directory);
+      if (result.cleaned) {
+        notify('文章项目已删除：' + item.directory, 'success');
+      } else {
+        notify('文章项目已移入回收目录，但临时文件清理未完成：' + result.trashPath, 'warning');
+      }
+      await onChanged().catch(error => notify('项目已删除，但列表刷新失败：' + errorText(error), 'warning'));
+    } catch (error) {
+      notify('删除文章项目失败：' + errorText(error), 'danger');
+    } finally {
+      setDeleting('');
+    }
+  }
+
   if (!project) {
     return (
       <div className="page">
@@ -131,14 +157,21 @@ export function ProjectsPage({
         {projects.length ? (
           <div className="project-grid">
             {projects.map(item => (
-              <button type="button" className="project-card" key={item.directory} onClick={() => onOpen(item.directory)}>
-                <span className="project-card-top">
-                  <Badge tone={item.stage === 'publish' ? 'success' : 'accent'}>{STAGE_LABELS[item.stage] || item.stage}</Badge>
-                  <small>{formatTime(item.updatedAt)}</small>
-                </span>
-                <strong>{item.title}</strong>
-                <code>{item.directory}</code>
-              </button>
+              <article className="project-card" key={item.directory}>
+                <button type="button" className="project-card-open" onClick={() => onOpen(item.directory)}>
+                  <span className="project-card-top">
+                    <Badge tone={item.stage === 'publish' ? 'success' : 'accent'}>{STAGE_LABELS[item.stage] || item.stage}</Badge>
+                    <small>{formatTime(item.updatedAt)}</small>
+                  </span>
+                  <strong>{item.title}</strong>
+                  <code>{item.directory}</code>
+                </button>
+                <div className="project-card-actions">
+                  <Button type="button" variant="danger" className="project-delete" busy={deleting === item.directory} disabled={Boolean(deleting)} onClick={() => void deleteProject(item)}>
+                    {deleting === item.directory ? '删除中' : '删除'}
+                  </Button>
+                </div>
+              </article>
             ))}
           </div>
         ) : (
@@ -196,6 +229,7 @@ function ProjectWorkspace({
   onGoConfig: () => void;
 }) {
   const [active, setActive] = useState(project.stage.id);
+  const [deleting, setDeleting] = useState(false);
   useEffect(() => {
     setActive(project.stage.id);
   }, [project.directory, project.stage.id]);
@@ -213,6 +247,29 @@ function ProjectWorkspace({
       notify('已保存「' + STAGE_LABELS[stage] + '」。', 'success');
     } catch (error) {
       notify(errorText(error), 'danger');
+    }
+  }
+
+  async function deleteCurrentProject() {
+    if (document.querySelector('.stage-workspace [aria-busy="true"]')) {
+      notify('当前阶段仍有操作在处理中，请等待完成后再删除项目。', 'warning');
+      return;
+    }
+    if (!window.confirm('删除当前文章项目及其全部文件？此操作不可撤销。')) return;
+    setDeleting(true);
+    try {
+      const result = await deleteProjectDirectory(api, project.directory);
+      if (result.cleaned) {
+        notify('文章项目已删除：' + project.directory, 'success');
+      } else {
+        notify('文章项目已移入回收目录，但临时文件清理未完成：' + result.trashPath, 'warning');
+      }
+      await onChanged().catch(error => notify('项目已删除，但列表刷新失败：' + errorText(error), 'warning'));
+      onClose();
+    } catch (error) {
+      notify('删除文章项目失败：' + errorText(error), 'danger');
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -234,6 +291,7 @@ function ProjectWorkspace({
         <div className="toolbar">
           <Button type="button" onClick={() => void onReload()}>重新加载</Button>
           <Button type="button" variant="ghost" onClick={onGoConfig}>写作配置</Button>
+          <Button type="button" variant="danger" busy={deleting} onClick={() => void deleteCurrentProject()}>删除项目</Button>
         </div>
       </header>
 
@@ -2420,35 +2478,12 @@ function FinalStage({
   );
 }
 
-async function publicationFingerprint(project: ArticleProject) {
-  const html = project.files.html || '';
-  const localSources = [...html.matchAll(/<img\b[^>]*\bsrc=["']([^"']+)["']/gi)]
-    .map(match => match[1])
-    .filter(source => !/^[a-z][a-z0-9+.-]*:/i.test(source) && !source.startsWith('//'))
-    .map(source => project.directory + '/' + source.replace(/^\.\//, ''));
-  const assets = [...new Set(localSources)].map(path => {
-    const entry = project.entries.find(item => item.path === path && item.kind === 'file');
-    return entry ? { path, size: entry.size || 0, mtime: entry.mtime } : { path, missing: true };
-  }).sort((left, right) => left.path.localeCompare(right.path));
-  const payload = JSON.stringify({
-    title: project.article.title || '',
-    author: project.article.author || '',
-    digest: project.article.digest || '',
-    cover: project.article.cover_image || '',
-    html,
-    assets,
-  });
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
-  return [...new Uint8Array(digest)].map(value => value.toString(16).padStart(2, '0')).join('');
-}
-
 function PublishStage({
   project, config, accounts, accountId: preferredAccountId, notify, onSaved,
 }: {
   project: ArticleProject; config: Record<string, any>; accounts: WechatAccount[]; accountId: string; notify: Notify;
   onSaved: () => void;
 }) {
-  const [accountId, setAccountId] = useState(preferredAccountId || accounts[0]?.id || '');
   const initialReceipt: Record<string, any> = (() => {
     try {
       return JSON.parse(project.files.publish || '{}');
@@ -2456,6 +2491,9 @@ function PublishStage({
       return {};
     }
   })();
+  const [accountId, setAccountId] = useState(
+    String(initialReceipt.accountId || preferredAccountId || accounts[0]?.id || ''),
+  );
   const [receipt, setReceipt] = useState<Record<string, any>>(initialReceipt);
   const receiptRef = useRef<Record<string, any>>(initialReceipt);
   const [mediaId, setMediaId] = useState(String(initialReceipt.mediaId || ''));
@@ -2464,6 +2502,7 @@ function PublishStage({
   const [status, setStatus] = useState<any>(null);
   const [busy, setBusy] = useState(false);
   const [archive, setArchive] = useState(false);
+  const [fingerprintReady, setFingerprintReady] = useState(false);
   const review = reviewArticle(project.files.format || project.files.writing, config, {
     html: project.files.html,
     title: project.article.title,
@@ -2473,9 +2512,10 @@ function PublishStage({
   const publishMethod = String(project.article.publish_method || config.publish_method || 'draft');
   const draftEnabled = publishMethod !== 'none';
   const draftState = String(receipt.state || '');
-  const draftBlocked = ['creating-draft', 'draft-unknown', 'submitting', 'unknown'].includes(draftState);
+  const draftBlocked = ['creating-draft', 'draft-unknown', 'submitting', 'unknown', 'failed'].includes(draftState);
   const draftMatches = Boolean(
-    mediaId
+    fingerprintReady
+    && mediaId
     && receipt.mediaId === mediaId
     && receipt.accountId === accountId
     && receipt.articleFingerprint
@@ -2483,7 +2523,7 @@ function PublishStage({
   );
 
   useEffect(() => {
-    if (!accountId && accounts[0]) setAccountId(accounts[0].id);
+    if (!accounts.some(account => account.id === accountId)) setAccountId(accounts[0]?.id || '');
   }, [accountId, accounts]);
   useEffect(() => {
     let next: Record<string, any> = {};
@@ -2497,10 +2537,14 @@ function PublishStage({
     setMediaId(String(next.mediaId || ''));
     setPublishId(String(next.publishId || ''));
   }, [project.files.publish]);
-  useEffect(() => {
+  useLayoutEffect(() => {
     let active = true;
-    void publicationFingerprint(project).then(value => {
-      if (active) setFingerprint(value);
+    setFingerprintReady(false);
+    void articlePublicationFingerprint(project).then(value => {
+      if (active) {
+        setFingerprint(value);
+        setFingerprintReady(true);
+      }
     }).catch(error => {
       if (active) {
         setFingerprint('');
@@ -2516,6 +2560,28 @@ function PublishStage({
     const next: Record<string, any> = { ...receiptRef.current, ...patch, updatedAt: new Date().toISOString() };
     const text = JSON.stringify(next, null, 2);
     await api.workspace.writeText({ path: project.directory + '/publish.json', text, overwrite: true });
+    const stickersDirectory = String(next.stickersDirectory || '');
+    if (stickersDirectory.startsWith('posts/stickers/') && !stickersDirectory.split('/').includes('..')) {
+      const stickerText = await readOptional(stickersDirectory + '/publish.json');
+      let stickerReceipt: Record<string, any> = {};
+      try {
+        stickerReceipt = stickerText ? JSON.parse(stickerText) : {};
+      } catch {
+        stickerReceipt = {};
+      }
+      const stickerNext = {
+        ...stickerReceipt,
+        ...patch,
+        projectDirectory: project.directory,
+        stickersDirectory,
+        updatedAt: next.updatedAt,
+      };
+      await api.workspace.writeText({
+        path: stickersDirectory + '/publish.json',
+        text: JSON.stringify(stickerNext, null, 2),
+        overwrite: true,
+      });
+    }
     receiptRef.current = next;
     setReceipt(next);
     if (next.mediaId !== undefined) setMediaId(String(next.mediaId || ''));
@@ -2523,6 +2589,14 @@ function PublishStage({
   }
 
   function wechatPayload() {
+    if (!project.directory.startsWith('drafts/')) throw new Error('公众号文章必须位于 drafts/ 目录。');
+    const title = String(project.article.title || '').trim();
+    if (!title) throw new Error('公众号草稿标题不能为空。');
+    if ([...title].length > 64) throw new Error('公众号草稿标题不能超过 64 个字符。');
+    const author = String(project.article.author || '').trim();
+    if ([...author].length > 32) throw new Error('公众号作者不能超过 32 个字符。');
+    const digest = String(project.article.digest || '').trim();
+    if ([...digest].length > 120) throw new Error('摘要不能超过 120 个字符。');
     const html = project.files.html;
     const assets: Array<{ placeholder: string; path: string }> = [];
     let counter = 0;
@@ -2533,13 +2607,14 @@ function PublishStage({
       assets.push({ placeholder, path: assetPath });
       return '<img' + before + ' src="qingzuo-asset:' + placeholder + '"' + after + '>';
     });
+    if (assets.length > 20) throw new Error('公众号正文图片不能超过 20 张。');
     return {
       accountId,
       article: {
         articleDir: project.directory,
-        title: String(project.article.title || ''),
-        author: String(project.article.author || ''),
-        digest: String(project.article.digest || ''),
+        title,
+        author,
+        digest,
         html: content,
         cover: { placeholder: 'cover', path: project.directory + '/' + project.article.cover_image },
         assets,
@@ -2558,6 +2633,14 @@ function PublishStage({
       notify('请选择公众号账号。', 'warning');
       return;
     }
+    if (!fingerprintReady) {
+      notify('正在核对文章指纹，请稍候再创建草稿。', 'warning');
+      return;
+    }
+    if (mediaId && draftMatches) {
+      notify('当前内容已有公众号草稿，无需重复创建。', 'warning');
+      return;
+    }
     if (!draftEnabled) {
       notify('当前配置为只保存到本地，不会创建公众号草稿。', 'warning');
       return;
@@ -2567,8 +2650,10 @@ function PublishStage({
       return;
     }
     setBusy(true);
-    const currentFingerprint = fingerprint || await publicationFingerprint(project);
+    const currentFingerprint = fingerprint || await articlePublicationFingerprint(project);
+    let hostCalled = false;
     try {
+      const payload = wechatPayload();
       await persist({
         accountId,
         title: project.article.title,
@@ -2578,7 +2663,8 @@ function PublishStage({
         articleFingerprint: currentFingerprint,
         error: null,
       });
-      const result = await api.wechat.createDraft(wechatPayload());
+      hostCalled = true;
+      const result = await api.wechat.createDraft(payload);
       setMediaId(result.mediaId);
       await persist({
         accountId,
@@ -2592,8 +2678,14 @@ function PublishStage({
       await onSaved();
       notify('公众号草稿已创建。请先在后台核对，再决定是否发布。', 'success');
     } catch (error) {
-      await persist({ state: 'draft-unknown', error: errorText(error) }).catch(() => {});
-      notify('草稿创建结果不确定或失败：' + errorText(error) + '。请先在公众号后台核对，避免重复创建。', 'danger');
+      const state = hostCalled ? 'draft-unknown' : 'draft-failed';
+      await persist({ state, error: errorText(error) }).catch(() => {});
+      notify(
+        hostCalled
+          ? '草稿创建结果不确定：' + errorText(error) + '。请先在公众号后台核对，避免重复创建。'
+          : '创建草稿前检查失败：' + errorText(error) + '。可修正后重试。',
+        'danger',
+      );
     } finally {
       setBusy(false);
     }
@@ -2622,14 +2714,16 @@ function PublishStage({
       notify('发布前门禁未通过，请重新检查文章、封面和审稿问题。', 'warning');
       return;
     }
-    const currentFingerprint = await publicationFingerprint(project);
-    if (!draftMatches || receipt.articleFingerprint !== currentFingerprint) {
-      notify('草稿创建后文章内容已变化，或草稿不属于当前账号。请重新创建草稿并核对。', 'danger');
-      return;
-    }
     setBusy(true);
+    let hostCalled = false;
     try {
+      const currentFingerprint = await articlePublicationFingerprint(project);
+      if (!draftMatches || receipt.articleFingerprint !== currentFingerprint) {
+        notify('草稿创建后文章内容已变化，或草稿不属于当前账号。请重新创建草稿并核对。', 'danger');
+        return;
+      }
       await persist({ accountId, mediaId, state: 'submitting', publishId: null, error: null });
+      hostCalled = true;
       const result = await api.wechat.publish({ accountId, mediaId });
       setPublishId(result.publishId);
       await persist({ accountId, mediaId, publishId: result.publishId, state: 'submitted' });
@@ -2637,7 +2731,10 @@ function PublishStage({
       await queryStatus(result.publishId);
     } catch (error) {
       const message = errorText(error);
-      if (/取消|cancel/i.test(message)) {
+      if (!hostCalled) {
+        await persist({ accountId, mediaId, state: 'draft', error: message }).catch(() => {});
+        notify('发布前检查失败：' + message + '。草稿仍保留。', 'danger');
+      } else if (/取消|cancel/i.test(message)) {
         await persist({ accountId, mediaId, state: 'draft', error: null }).catch(() => {});
         notify('发布已取消，草稿仍保留。', 'info');
       } else {
@@ -2675,12 +2772,20 @@ function PublishStage({
   async function resetUnknownState() {
     if (!draftBlocked) return;
     if (!window.confirm('请确认已在公众号后台核对草稿或发布状态。重置后再次操作仍可能造成重复，是否继续？')) return;
-    await persist({ state: 'draft-reset', error: null, articleFingerprint: '', publishId: null }).catch(error => {
+    try {
+      await persist({
+        state: 'draft-reset',
+        error: null,
+        articleFingerprint: '',
+        mediaId: null,
+        publishId: null,
+      });
+      setMediaId('');
+      setPublishId('');
+      notify('本地未知状态已重置。请重新创建草稿并核对。', 'warning');
+    } catch (error) {
       notify(errorText(error), 'danger');
-    });
-    setMediaId('');
-    setPublishId('');
-    notify('本地未知状态已重置。请重新创建草稿并核对。', 'warning');
+    }
   }
 
   async function archiveProject() {
@@ -2725,14 +2830,19 @@ function PublishStage({
       {mediaId && !draftMatches && receipt.articleFingerprint ? <div className="notice warning">草稿创建后文章内容或账号已变化，请重新创建草稿。</div> : null}
       {draftBlocked ? (
         <div className="notice warning">
-          上次操作的结果未知。请先在公众号后台核对；确认后才能查询状态或明确重置。插件不会自动重发。
-          <Button type="button" onClick={() => void resetUnknownState()}>我已核对，重置未知状态</Button>
+          {draftState === 'failed'
+            ? '上次发布未成功。请先在公众号后台核对，再重置本地状态并重新创建草稿。'
+            : '上次操作的结果未知。请先在公众号后台核对；确认后才能查询状态或明确重置。'}
+          插件不会自动重发。
+          <Button type="button" onClick={() => void resetUnknownState()}>
+            {draftState === 'failed' ? '我已核对，重置失败状态' : '我已核对，重置未知状态'}
+          </Button>
         </div>
       ) : null}
       {status ? <div className="receipt"><span>状态</span><strong>{status.status}</strong>{status.articleUrl ? <a href={status.articleUrl} target="_blank" rel="noreferrer">查看文章</a> : null}</div> : null}
       <div className="publish-actions">
-        <Button type="button" variant="primary" onClick={() => void createDraft()} busy={busy} disabled={!gate.ok || !accountId || draftBlocked || !draftEnabled}>
-          创建公众号草稿
+        <Button type="button" variant="primary" onClick={() => void createDraft()} busy={busy} disabled={!gate.ok || !accountId || draftBlocked || !draftEnabled || !fingerprintReady || Boolean(mediaId && draftMatches)}>
+          {mediaId && draftMatches ? '当前内容已有草稿' : '创建公众号草稿'}
         </Button>
         <Button type="button" onClick={() => void publish()} busy={busy} disabled={!mediaId || Boolean(publishId) || draftBlocked || !draftMatches || publishMethod !== 'published'}>
           提交直接发布

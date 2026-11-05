@@ -1,5 +1,6 @@
 import YAML from 'yaml';
 import { DEFAULT_MCP_IMAGE_ARGS, renderMcpArguments } from './mcp-images.mjs';
+import { normalizeStickerLanguage } from './stickers.mjs';
 
 export const PRESET_FIELDS = [
   'structure',
@@ -60,6 +61,7 @@ export const DEFAULT_CONFIG = {
   image_density: '每节一图',
   caption_style: '有图注',
   multi_image_count: 6,
+  sticker_language: '简体中文',
   review_required: ['敏感词', '错别字', '链接', '原创标注'],
   custom_sensitive_words: [],
   review_output_format: '分块详细',
@@ -252,6 +254,7 @@ export function normalizeConfigForSave(config = {}) {
   if (!String(value.summary_guidance ?? '').trim() && summary.guidance) value.summary_guidance = summary.guidance;
   value.title_max_length = Number(value.title_max_length) || 25;
   value.multi_image_count = Math.min(9, Math.max(1, Number(value.multi_image_count) || 6));
+  value.sticker_language = normalizeStickerLanguage(value.sticker_language);
   value.wechat_publish_slot = Math.max(1, Number(value.wechat_publish_slot) || 1);
   value.need_open_comment = value.need_open_comment ? 1 : 0;
   value.only_fans_can_comment = value.only_fans_can_comment ? 1 : 0;
