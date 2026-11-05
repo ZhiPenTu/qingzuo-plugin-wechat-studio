@@ -158,6 +158,15 @@ export function singlePreset(config, article, field, fallback = '') {
   return values.length ? values[0] : fallback;
 }
 
+export function resolveFormatOptions(config = {}, article = {}) {
+  return {
+    theme: singlePreset(config, article, 'format_preset', '亲和'),
+    scheme: singlePreset(config, article, 'format_scheme', ''),
+    color: String(article.format_color || config.format_color || ''),
+    fontSize: String(article.format_font_size || config.format_font_size || ''),
+  };
+}
+
 const SUMMARY_RANGE_PATTERN = /(\d{1,4})\s*[-–—~～至]\s*(\d{1,4})/g;
 
 export function splitSummarySetting(value) {

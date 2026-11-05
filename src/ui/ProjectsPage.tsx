@@ -19,12 +19,14 @@ import {
   chooseMedium,
   mapGeneratedFiles,
   planImages,
+  rewriteCoverImageMarker,
   rewriteImageMarkersWithMapping,
 } from '../lib/images.mjs';
 import { compressBodyImageBytes, cropImageBytes, base64Bytes, bytesBase64 } from '../lib/crop.mjs';
 import { imageModelLabel, imageModelSource } from '../lib/image-models.mjs';
 import { mappingForPlan, parseGeneratedMapping, projectImagePreviews } from '../lib/image-previews.mjs';
 import { generateImagesThroughMcp, mcpBatchToken, mcpCoverSize } from '../lib/mcp-images.mjs';
+import { resolveFormatOptions } from '../lib/config.mjs';
 import {
   appendLog,
   loadProject,
@@ -764,16 +766,24 @@ function FormatStage({
   project: ArticleProject; config: Record<string, any>; themeSummaries: any[]; notify: Notify;
   onSaved: () => void; onNext: () => void;
 }) {
-  const initialTheme = project.article.default_format_preset?.[0] || config.custom_format_preset?.[0] || config.default_format_preset?.[0] || '亲和';
-  const initialScheme = project.article.default_format_scheme?.[0] || config.custom_format_scheme?.[0] || config.default_format_scheme?.[0] || '';
-  const [markdown, setMarkdown] = useState(project.files.format || project.files.writing || project.files.research || '');
-  const [theme, setTheme] = useState(String(initialTheme));
-  const [scheme, setScheme] = useState(String(initialScheme));
+  const initialFormat = resolveFormatOptions(config, project.article);
+  const coverImage = hasSavedCover(project) ? String(project.article.cover_image || '').trim() : '';
+  const withCover = (value: string) => rewriteCoverImageMarker(value, coverImage, { insert: true, invalid: 'placeholder' });
+  const [markdown, setMarkdown] = useState(() => withCover(
+    project.files.format || project.files.writing || project.files.research || '',
+  ));
+  const [theme, setTheme] = useState(initialFormat.theme);
+  const [scheme, setScheme] = useState(initialFormat.scheme);
   const [html, setHtml] = useState(project.files.html || '');
   const [previewHtml, setPreviewHtml] = useState('');
   const [warnings, setWarnings] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const themeInfo = themeSummaries.find((item: any) => item.name === theme) || themeSummaries[0];
+
+  useEffect(() => {
+    if (!coverImage) return;
+    setMarkdown(current => withCover(current));
+  }, [coverImage]);
 
   useEffect(() => {
     const themeValue = themeSummaries.find((item: any) => item.name === theme);
@@ -814,20 +824,22 @@ function FormatStage({
 
   async function render(notifySuccess = false) {
     setBusy(true);
+    const source = withCover(markdown);
+    if (source !== markdown) setMarkdown(source);
     try {
       const value = await callWorker<any>('render', {
-        markdown,
+        markdown: source,
         theme,
         scheme,
-        color: project.article.format_color || config.format_color || '',
-        fontSize: project.article.format_font_size || config.format_font_size || '',
+        color: initialFormat.color,
+        fontSize: initialFormat.fontSize,
         embeds: config.embeds || {},
         captionStyle: config.caption_style || '有图注',
       });
       setHtml(value.html);
       setWarnings(Array.isArray(value.warnings) ? value.warnings : []);
       if (notifySuccess) notify('预览已更新。', 'success');
-      return value;
+      return { ...value, markdown: source };
     } catch (error) {
       notify(errorText(error), 'danger');
       return null;
@@ -841,7 +853,11 @@ function FormatStage({
     try {
       const value = await render(false);
       if (!value) return;
-      await api.workspace.writeText({ path: project.directory + '/article.md', text: markdown, overwrite: true });
+      await saveArticle(api, project.directory, {
+        default_format_preset: [theme],
+        default_format_scheme: scheme ? [scheme] : [],
+      });
+      await api.workspace.writeText({ path: project.directory + '/article.md', text: value.markdown, overwrite: true });
       await api.workspace.writeText({ path: project.directory + '/article.html', text: value.html, overwrite: true });
       next ? onNext() : onSaved();
     } catch (error) {
@@ -897,6 +913,7 @@ function ImagesStage({
   onSaved: () => void; onNext: () => void; onReload: () => Promise<void>;
 }) {
   const baseMarkdown = project.files.format || project.files.writing || '';
+  const savedCover = hasSavedCover(project) ? String(project.article.cover_image || '').trim() : '';
   const [plan, setPlan] = useState<any>(null);
   const [modelId, setModelId] = useState(preferredModelId || imageModels[0]?.id || '');
   const [batch, setBatch] = useState<any>(null);
@@ -1063,6 +1080,19 @@ function ImagesStage({
     return previews.find(image => image.kind === 'body' && image.title === title) || null;
   }
 
+  function renderArticle(source: string) {
+    const format = resolveFormatOptions(config, project.article);
+    return callWorker<any>('render', {
+      markdown: source,
+      theme: format.theme,
+      scheme: format.scheme,
+      color: format.color,
+      fontSize: format.fontSize,
+      embeds: config.embeds || {},
+      captionStyle: config.caption_style || '有图注',
+    });
+  }
+
   async function applySingleImage(target: ImageTarget, sourcePath: string) {
     if (!plan) throw new Error('配图方案尚未加载。');
     const token = shortId(String(Date.now()));
@@ -1107,14 +1137,9 @@ function ImagesStage({
         createdFiles.push(targetPath);
         mapping[target.index] = targetPath.slice(project.directory.length + 1);
       }
-      const rewritten = rewriteImageMarkersWithMapping(baseMarkdown, plan, mapping);
-      const rendered = await callWorker<any>('render', {
-        markdown: rewritten,
-        theme: project.article.default_format_preset?.[0] || config.custom_format_preset?.[0] || config.default_format_preset?.[0] || '亲和',
-        scheme: project.article.default_format_scheme?.[0] || config.custom_format_scheme?.[0] || config.default_format_scheme?.[0] || '',
-        embeds: config.embeds || {},
-        captionStyle: config.caption_style || '有图注',
-      });
+      const coverRelative = coverPath ? coverPath.slice(project.directory.length + 1) : savedCover;
+      const rewritten = rewriteImageMarkersWithMapping(baseMarkdown, plan, mapping, { cover: coverRelative, invalidCover: 'placeholder' });
+      const rendered = await renderArticle(rewritten);
       await api.workspace.writeText({ path: project.directory + '/article.md', text: rewritten, overwrite: true });
       await api.workspace.writeText({ path: project.directory + '/article.html', text: rendered.html, overwrite: true });
       await api.workspace.writeText({
@@ -1504,7 +1529,15 @@ function ImagesStage({
     setMessage('正在整理你提供的封面…');
     const createdFiles: string[] = [];
     const sourcePath = project.directory + '/imgs/user-cover-' + shortId(file.name + Date.now()) + '.' + file.name.split('.').pop()?.toLowerCase();
+    let previousMarkdown = '';
+    let previousHtml = '';
+    let previousArticle = '';
+    let snapshotsReady = false;
     try {
+      previousMarkdown = await readOptional(project.directory + '/article.md');
+      previousHtml = await readOptional(project.directory + '/article.html');
+      previousArticle = await readOptional(project.directory + '/article.yaml');
+      snapshotsReady = true;
       await api.workspace.writeFile({ path: sourcePath, token: file.token, overwrite: false });
       const source = await api.workspace.readFile({ path: sourcePath });
       const sourceBytes = base64Bytes(source.data);
@@ -1521,16 +1554,29 @@ function ImagesStage({
       createdFiles.push(cover235Path);
       await api.workspace.writeBase64({ path: cover11Path, data: bytesBase64(cover11), mime: 'image/jpeg', overwrite: false });
       createdFiles.push(cover11Path);
+      const coverRelative = coverPath.slice(project.directory.length + 1);
+      const rewritten = rewriteImageMarkersWithMapping(baseMarkdown, plan, generatedMapping.current, { cover: coverRelative, invalidCover: 'placeholder' });
+      const rendered = await renderArticle(rewritten);
       await saveArticle(api, project.directory, {
-        cover_image: coverPath.slice(project.directory.length + 1),
+        cover_image: coverRelative,
         pic_crop_235_1: cover235Path.slice(project.directory.length + 1),
         pic_crop_1_1: cover11Path.slice(project.directory.length + 1),
       });
+      await api.workspace.writeText({ path: project.directory + '/article.md', text: rewritten, overwrite: true });
+      await api.workspace.writeText({ path: project.directory + '/article.html', text: rendered.html, overwrite: true });
       setPreviews(current => [{ path: coverPath, title: '封面', kind: 'cover' }, ...current.filter(item => item.kind !== 'cover')]);
       await onReload().catch(() => {});
       setMessage('封面已保存。请检查手机预览中的裁切效果。');
       notify('已使用你提供的封面。', 'success');
     } catch (error) {
+      if (snapshotsReady) {
+        if (previousMarkdown) await api.workspace.writeText({ path: project.directory + '/article.md', text: previousMarkdown, overwrite: true }).catch(() => {});
+        else await api.workspace.remove({ path: project.directory + '/article.md' }).catch(() => {});
+        if (previousHtml) await api.workspace.writeText({ path: project.directory + '/article.html', text: previousHtml, overwrite: true }).catch(() => {});
+        else await api.workspace.remove({ path: project.directory + '/article.html' }).catch(() => {});
+        if (previousArticle) await api.workspace.writeText({ path: project.directory + '/article.yaml', text: previousArticle, overwrite: true }).catch(() => {});
+        else await api.workspace.remove({ path: project.directory + '/article.yaml' }).catch(() => {});
+      }
       for (const path of createdFiles.reverse()) await api.workspace.remove({ path }).catch(() => {});
       notify(errorText(error), 'danger');
       setMessage(errorText(error));
@@ -1550,8 +1596,16 @@ function ImagesStage({
     const token = shortId(String(Date.now()));
     const createdFiles: string[] = [];
     const sourceFiles: string[] = [];
-    const mapping: Record<number, string> = {};
+    const mapping: Record<number, string> = { ...generatedMapping.current };
+    let previousMarkdown = '';
+    let previousHtml = '';
+    let previousPlan = '';
+    let snapshotsReady = false;
     try {
+      previousMarkdown = await readOptional(project.directory + '/article.md');
+      previousHtml = await readOptional(project.directory + '/article.html');
+      previousPlan = await readOptional(project.directory + '/img-plan.json');
+      snapshotsReady = true;
       const items = plan.items.slice(0, files.length);
       for (const [index, file] of files.entries()) {
         const item = items[index];
@@ -1559,11 +1613,7 @@ function ImagesStage({
         const extension = file.name.split('.').pop()?.toLowerCase() || 'png';
         const sourcePath = project.directory + '/imgs/user-body-' + token + '-' + String(index + 1).padStart(2, '0') + '.' + extension;
         sourceFiles.push(sourcePath);
-        try {
-          await api.workspace.writeFile({ path: sourcePath, token: file.token, overwrite: false });
-        } finally {
-          await api.files.release(file.token).catch(() => {});
-        }
+        await api.workspace.writeFile({ path: sourcePath, token: file.token, overwrite: false });
         const source = await api.workspace.readFile({ path: sourcePath });
         const compressed = await compressBodyImageBytes(base64Bytes(source.data), source.mime);
         const target = project.directory + '/imgs/body-' + String(index + 1).padStart(2, '0') + '-user-' + token + '.jpg';
@@ -1571,14 +1621,11 @@ function ImagesStage({
         createdFiles.push(target);
         mapping[item.index] = target.slice(project.directory.length + 1);
       }
-      const rewritten = rewriteImageMarkersWithMapping(baseMarkdown, plan, mapping);
-      const rendered = await callWorker<any>('render', {
-        markdown: rewritten,
-        theme: project.article.default_format_preset?.[0] || config.custom_format_preset?.[0] || config.default_format_preset?.[0] || '亲和',
-        scheme: project.article.default_format_scheme?.[0] || config.custom_format_scheme?.[0] || config.default_format_scheme?.[0] || '',
-        embeds: config.embeds || {},
-        captionStyle: config.caption_style || '有图注',
+      const rewritten = rewriteImageMarkersWithMapping(baseMarkdown, plan, mapping, {
+        cover: savedCover,
+        invalidCover: 'placeholder',
       });
+      const rendered = await renderArticle(rewritten);
       await api.workspace.writeText({ path: project.directory + '/article.md', text: rewritten, overwrite: true });
       await api.workspace.writeText({ path: project.directory + '/article.html', text: rendered.html, overwrite: true });
       await api.workspace.writeText({
@@ -1593,10 +1640,19 @@ function ImagesStage({
       setMessage(missing ? '已导入 ' + files.length + ' 张，仍有 ' + missing + ' 个图位缺少图片。' : '正文图片已写入并更新文章。');
       notify(missing ? '部分图位仍缺少图片，请补充后再进入终审。' : '已使用你提供的正文图片。', missing ? 'warning' : 'success');
     } catch (error) {
+      if (snapshotsReady) {
+        if (previousMarkdown) await api.workspace.writeText({ path: project.directory + '/article.md', text: previousMarkdown, overwrite: true }).catch(() => {});
+        else await api.workspace.remove({ path: project.directory + '/article.md' }).catch(() => {});
+        if (previousHtml) await api.workspace.writeText({ path: project.directory + '/article.html', text: previousHtml, overwrite: true }).catch(() => {});
+        else await api.workspace.remove({ path: project.directory + '/article.html' }).catch(() => {});
+        if (previousPlan) await api.workspace.writeText({ path: project.directory + '/img-plan.json', text: previousPlan, overwrite: true }).catch(() => {});
+        else await api.workspace.remove({ path: project.directory + '/img-plan.json' }).catch(() => {});
+      }
       for (const path of createdFiles.reverse()) await api.workspace.remove({ path }).catch(() => {});
       notify(errorText(error), 'danger');
       setMessage(errorText(error));
     } finally {
+      for (const file of files) await api.files.release(file.token).catch(() => {});
       for (const path of sourceFiles) await api.workspace.remove({ path }).catch(() => {});
       setBusy(false);
     }
@@ -1614,49 +1670,44 @@ function ImagesStage({
     const previousPlan = await readOptional(project.directory + '/img-plan.json');
     const previousArticle = await readOptional(project.directory + '/article.yaml');
     const token = shortId(value.id);
-    const mapping: Record<number, string> = {};
+    const mapping: Record<number, string> = { ...generatedMapping.current };
     const generatedItems = plan.items.filter((item: any) => item.generate);
     const coverEntry = generated.find((entry: any) => entry.batchIndex === 1);
     let coverPath = '';
     let cover235Path = '';
     let cover11Path = '';
-    if (coverEntry) {
-      const coverFile = await api.workspace.readFile({ path: coverEntry.path });
-      const coverBytes = base64Bytes(coverFile.data);
-      const coverAspect = String(config.cover_aspect || '2.35:1');
-      const coverBytesJpeg = await cropImageBytes(coverBytes, coverFile.mime, coverAspect, 0.9);
-      coverPath = project.directory + '/cover-' + token + '.jpg';
-      await api.workspace.writeBase64({ path: coverPath, data: bytesBase64(coverBytesJpeg), mime: 'image/jpeg', overwrite: false });
-      createdFiles.push(coverPath);
-      const crop235 = await cropImageBytes(coverBytes, coverFile.mime, '2.35:1', 0.9);
-      const crop11 = await cropImageBytes(coverBytes, coverFile.mime, '1:1', 0.9);
-      cover235Path = project.directory + '/cover-235-' + token + '.jpg';
-      cover11Path = project.directory + '/cover-11-' + token + '.jpg';
-      await api.workspace.writeBase64({ path: cover235Path, data: bytesBase64(crop235), mime: 'image/jpeg', overwrite: false });
-      createdFiles.push(cover235Path);
-      await api.workspace.writeBase64({ path: cover11Path, data: bytesBase64(crop11), mime: 'image/jpeg', overwrite: false });
-      createdFiles.push(cover11Path);
-    }
-    for (let index = 0; index < generatedItems.length; index += 1) {
-      const item = generatedItems[index];
-      const entry = generated.find((candidate: any) => candidate.batchIndex === index + 2);
-      if (!entry) continue;
-      const bodyFile = await api.workspace.readFile({ path: entry.path });
-      const compressed = await compressBodyImageBytes(base64Bytes(bodyFile.data), bodyFile.mime);
-      const target = project.directory + '/imgs/body-' + String(index + 1).padStart(2, '0') + '-' + token + '.jpg';
-      await api.workspace.writeBase64({ path: target, data: bytesBase64(compressed), mime: 'image/jpeg', overwrite: false });
-      createdFiles.push(target);
-      mapping[item.index] = target.slice(project.directory.length + 1);
-    }
     try {
-      const rewritten = rewriteImageMarkersWithMapping(baseMarkdown, plan, mapping);
-      const rendered = await callWorker<any>('render', {
-        markdown: rewritten,
-        theme: project.article.default_format_preset?.[0] || config.custom_format_preset?.[0] || config.default_format_preset?.[0] || '亲和',
-        scheme: project.article.default_format_scheme?.[0] || config.custom_format_scheme?.[0] || config.default_format_scheme?.[0] || '',
-        embeds: config.embeds || {},
-        captionStyle: config.caption_style || '有图注',
-      });
+      if (coverEntry) {
+        const coverFile = await api.workspace.readFile({ path: coverEntry.path });
+        const coverBytes = base64Bytes(coverFile.data);
+        const coverAspect = String(config.cover_aspect || '2.35:1');
+        const coverBytesJpeg = await cropImageBytes(coverBytes, coverFile.mime, coverAspect, 0.9);
+        coverPath = project.directory + '/cover-' + token + '.jpg';
+        await api.workspace.writeBase64({ path: coverPath, data: bytesBase64(coverBytesJpeg), mime: 'image/jpeg', overwrite: false });
+        createdFiles.push(coverPath);
+        const crop235 = await cropImageBytes(coverBytes, coverFile.mime, '2.35:1', 0.9);
+        const crop11 = await cropImageBytes(coverBytes, coverFile.mime, '1:1', 0.9);
+        cover235Path = project.directory + '/cover-235-' + token + '.jpg';
+        cover11Path = project.directory + '/cover-11-' + token + '.jpg';
+        await api.workspace.writeBase64({ path: cover235Path, data: bytesBase64(crop235), mime: 'image/jpeg', overwrite: false });
+        createdFiles.push(cover235Path);
+        await api.workspace.writeBase64({ path: cover11Path, data: bytesBase64(crop11), mime: 'image/jpeg', overwrite: false });
+        createdFiles.push(cover11Path);
+      }
+      for (let index = 0; index < generatedItems.length; index += 1) {
+        const item = generatedItems[index];
+        const entry = generated.find((candidate: any) => candidate.batchIndex === index + 2);
+        if (!entry) continue;
+        const bodyFile = await api.workspace.readFile({ path: entry.path });
+        const compressed = await compressBodyImageBytes(base64Bytes(bodyFile.data), bodyFile.mime);
+        const target = project.directory + '/imgs/body-' + String(index + 1).padStart(2, '0') + '-' + token + '.jpg';
+        await api.workspace.writeBase64({ path: target, data: bytesBase64(compressed), mime: 'image/jpeg', overwrite: false });
+        createdFiles.push(target);
+        mapping[item.index] = target.slice(project.directory.length + 1);
+      }
+      const coverRelative = coverPath ? coverPath.slice(project.directory.length + 1) : savedCover;
+      const rewritten = rewriteImageMarkersWithMapping(baseMarkdown, plan, mapping, { cover: coverRelative, invalidCover: 'placeholder' });
+      const rendered = await renderArticle(rewritten);
       await api.workspace.writeText({ path: project.directory + '/article.md', text: rewritten, overwrite: true });
       await api.workspace.writeText({ path: project.directory + '/article.html', text: rendered.html, overwrite: true });
       await api.workspace.writeText({ path: project.directory + '/img-plan.json', text: JSON.stringify({ ...plan, generated: mapping, batchId: value.id }, null, 2), overwrite: true });
@@ -1683,7 +1734,7 @@ function ImagesStage({
       }
       throw error;
     }
-    const missing = (coverEntry ? 0 : 1) + generatedItems.filter((item: any) => !mapping[item.index]).length;
+    const missing = (coverEntry || savedCover ? 0 : 1) + generatedItems.filter((item: any) => !mapping[item.index]).length;
     generatedMapping.current = mapping;
     await onReload().catch(() => {});
     setPreviews(previewsFromMapping(mapping, coverPath));

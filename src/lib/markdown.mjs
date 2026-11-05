@@ -8,6 +8,27 @@ export function isCoverImageAlt(alt) {
   return type === '封面' || type === 'cover';
 }
 
+export function fenceInfo(line) {
+  const match = String(line).match(/^\s*(`{3,}|~{3,})/);
+  return match ? { char: match[1][0], length: match[1].length } : null;
+}
+
+export function lineCodeFlags(lines) {
+  const flags = [];
+  let fence = null;
+  for (const line of lines) {
+    const info = fenceInfo(line);
+    if (!fence) {
+      if (info) fence = info;
+      flags.push(Boolean(info));
+      continue;
+    }
+    flags.push(true);
+    if (info && info.char === fence.char && info.length >= fence.length) fence = null;
+  }
+  return flags;
+}
+
 function escapeHtml(value) {
   return String(value ?? '')
     .replaceAll('&', '&amp;')
@@ -26,7 +47,6 @@ function normalizeEmbedName(value) {
 }
 
 const PROTECT = [
-  [/^[ \t]*```[^\n]*\n.*?^[ \t]*```[ \t]*$/gm, true],
   [/`[^`\n]+`/g, true],
   [/\]\([^)\s]+(?:\s+["“'‘][^"”'’]*["”'’])?\)/g, false],
   [/\{embed:\w+:[^}\n]+\}/g, false],
@@ -34,9 +54,29 @@ const PROTECT = [
   [/https?:\/\/[^\s<>()"']+/g, true],
 ];
 
+function protectFencedBlocks(text, protectedParts) {
+  const lines = String(text).split('\n');
+  const flags = lineCodeFlags(lines);
+  const output = [];
+  let index = 0;
+  while (index < lines.length) {
+    if (!flags[index]) {
+      output.push(lines[index]);
+      index += 1;
+      continue;
+    }
+    const start = index;
+    index += 1;
+    while (index < lines.length && flags[index]) index += 1;
+    protectedParts.push(lines.slice(start, index).join('\n'));
+    output.push('\u0000' + (protectedParts.length - 1) + '\u0000');
+  }
+  return output.join('\n');
+}
+
 export function preformatMarkdown(text) {
   const protectedParts = [];
-  let result = String(text ?? '');
+  let result = protectFencedBlocks(String(text ?? ''), protectedParts);
   for (const [pattern, spaced] of PROTECT) {
     result = result.replace(pattern, match => {
       protectedParts.push(match);
@@ -92,7 +132,10 @@ export function wantCaption(alt, captionStyle) {
 
 export function extractImageSlots(markdown, { captionStyle = '有图注' } = {}) {
   const slots = [];
-  for (const rawLine of String(markdown || '').split('\n')) {
+  const lines = String(markdown || '').replace(/\r\n?/g, '\n').split('\n');
+  const flags = lineCodeFlags(lines);
+  for (const [lineIndex, rawLine] of lines.entries()) {
+    if (flags[lineIndex]) continue;
     const line = rawLine.trim();
     const match = line.match(/^!\[(.*?)\]\(\s*(\S+?)(?:\s+["“'‘](.*?)["”'’])?\s*\)$/);
     if (!match) continue;
@@ -366,7 +409,7 @@ export function renderMarkdown(markdown, options = {}) {
   const lines = source.split('\n');
   const parts = [];
   let paragraph = [];
-  let inCode = false;
+  let fence = null;
   let codeLines = [];
   let quoteLines = [];
   let listStack = [];
@@ -377,6 +420,13 @@ export function renderMarkdown(markdown, options = {}) {
   let skipUntil = -1;
 
   const pStyle = styles.p || `margin:0 0 ${styles['paragraph-spacing'] || '1.5em'}; font-size:${styles['font-size'] || '16px'}; line-height:${styles['line-height'] || '1.8'}; color:${styles['text-color'] || '#333333'};`;
+  const flushCode = () => {
+    if (!fence) return;
+    const preStyle = styles.pre || 'background:#f5f5f5; padding:16px; border-radius:4px; font-size:13px; line-height:1.8; overflow-x:auto; color:#333;';
+    parts.push('<pre style="' + escapeAttr(preStyle) + '"><code>' + escapeHtml(codeLines.join('\n')) + '</code></pre>');
+    fence = null;
+    codeLines = [];
+  };
   const flushParagraph = () => {
     if (!paragraph.length) return;
     const text = paragraph.map((line, index) => index < paragraph.length - 1 && (line.endsWith('  ') || line.endsWith('\\')) ? line.replace(/[\\ ]+$/, '') + '<br/>' : line.trimEnd()).join(' ');
@@ -412,23 +462,18 @@ export function renderMarkdown(markdown, options = {}) {
     const rawLine = lines[index];
     const line = rawLine.trim();
 
-    if (line.startsWith('```')) {
-      if (!inCode) {
-        flushParagraph();
-        flushQuote();
-        closeLists(listStack, parts);
-        inCode = true;
-        codeLines = [];
-      } else {
-        const preStyle = styles.pre || 'background:#f5f5f5; padding:16px; border-radius:4px; font-size:13px; line-height:1.8; overflow-x:auto; color:#333;';
-        parts.push('<pre style="' + escapeAttr(preStyle) + '"><code>' + escapeHtml(codeLines.join('\n')) + '</code></pre>');
-        inCode = false;
-        codeLines = [];
-      }
+    const fenceMark = fenceInfo(line);
+    if (fence) {
+      if (fenceMark && fenceMark.char === fence.char && fenceMark.length >= fence.length) flushCode();
+      else codeLines.push(rawLine);
       continue;
     }
-    if (inCode) {
-      codeLines.push(rawLine);
+    if (fenceMark) {
+      flushParagraph();
+      flushQuote();
+      closeLists(listStack, parts);
+      fence = fenceMark;
+      codeLines = [];
       continue;
     }
     if (!line) {
@@ -546,8 +591,11 @@ export function renderMarkdown(markdown, options = {}) {
         continue;
       }
       const caption = (image[3] || '').trim();
-      if (isCoverImageAlt(alt)) continue;
-      const imageStyle = styles.img || 'max-width:100%; border-radius:4px;';
+      const cover = isCoverImageAlt(alt);
+      if (cover && /^placeholder(?:-|$)/i.test(src)) continue;
+      const imageStyle = cover
+        ? (styles.img || 'max-width:100%; border-radius:4px;') + '; height:auto; aspect-ratio:auto;'
+        : (styles.img || 'max-width:100%; border-radius:4px;');
       let imageHtml = '<p style="text-align:center; margin:1.5em 0;"><img src="' + escapeAttr(safeSource) + '"' + imageDims(safeSource) +
         ' alt="' + escapeAttr(alt) + '" style="' + escapeAttr(imageStyle) + '" /></p>';
       if (components['img-deco']?.template) imageHtml = substituteTheme(components['img-deco'].template, styles).replace('{content}', imageHtml);
@@ -598,7 +646,7 @@ export function renderMarkdown(markdown, options = {}) {
   flushParagraph();
   flushQuote();
   closeLists(listStack, parts);
-  if (inCode) parts.push('<pre style="' + escapeAttr(styles.pre || '') + '"><code>' + escapeHtml(codeLines.join('\n')) + '</code></pre>');
+  flushCode();
   return { html: parts.join('\n'), warnings };
 }
 

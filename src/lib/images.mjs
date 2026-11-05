@@ -1,4 +1,4 @@
-import { extractImageSlots } from './markdown.mjs';
+import { extractImageSlots, isCoverImageAlt, lineCodeFlags } from './markdown.mjs';
 import { mergedConfig, normalizePresetList } from './config.mjs';
 
 export const COVER_STYLES = [
@@ -206,31 +206,113 @@ export function planImages(markdown, config = {}, article = {}) {
   return { title, medium, cover, items, prompts, warnings, source, bodySlots };
 }
 
+const IMAGE_LINE = /^!\[(.*?)\]\(\s*(\S+?)(?:\s+["“'‘](.*?)["”'’])?\s*\)$/;
+
+function mapLinesOutsideCode(markdown, transform) {
+  const lines = String(markdown || '').replace(/\r\n?/g, '\n').split('\n');
+  const flags = lineCodeFlags(lines);
+  return lines
+    .map((line, index) => flags[index] ? line : transform(line))
+    .filter(line => line !== null)
+    .join('\n');
+}
+
 export function rewriteImageMarkers(markdown, plan) {
+  const items = Array.isArray(plan?.items) ? plan.items : [];
   let cursor = 0;
-  return String(markdown || '').replace(/^!\[(.*?)\]\(\s*(\S+?)(?:\s+["“'‘](.*?)["”'’])?\s*\)$/gm, (line, alt) => {
-    if (cursor >= plan.items.length) return line;
-    const item = plan.items[cursor];
+  return mapLinesOutsideCode(markdown, line => {
+    const match = line.match(IMAGE_LINE);
+    if (!match) return line;
+    const alt = match[1];
+    if (isCoverImageAlt(alt)) return line;
+    if (cursor >= items.length) return line;
+    const item = items[cursor];
     if (item.alt !== alt) return line;
     cursor += 1;
     if (!item.generate) return line;
-    const caption = item.caption ? ' "' + item.caption.replaceAll('"', '\\"') + '"' : '';
-    return '![' + item.alt + '](' + item.file + caption + ')';
+    return imageMarker(item.alt, item.file, item.caption);
   });
 }
 
-export function rewriteImageMarkersWithMapping(markdown, plan, mapping = {}) {
+function imageMarker(alt, path, caption) {
+  const title = caption ? ' "' + String(caption).replaceAll('"', '\\"') + '"' : '';
+  return '![' + alt + '](' + path + title + ')';
+}
+
+const CAPTION_LINE = /^\s*(?:图注|图)\s*[:：]/;
+
+function captionAfter(lines, flags, index) {
+  let next = index + 1;
+  while (next < lines.length && !lines[next].trim()) next += 1;
+  return next < lines.length && !flags[next] && CAPTION_LINE.test(lines[next]) ? next : -1;
+}
+
+export function rewriteCoverImageMarker(markdown, cover, { insert = false, plan = null, invalid = 'keep' } = {}) {
+  const path = String(cover || '').trim();
+  const original = String(markdown || '');
+  const placeholder = !path;
+  if (placeholder && invalid !== 'placeholder') return original;
+  const target = path || 'placeholder';
+  const source = original.replace(/\r\n?/g, '\n');
+  const lines = source.split('\n');
+  const flags = lineCodeFlags(lines);
+  const covers = [];
+  for (const [index, line] of lines.entries()) {
+    if (flags[index]) continue;
+    const match = line.match(IMAGE_LINE);
+    if (match && isCoverImageAlt(match[1])) covers.push({ index, alt: match[1], caption: match[3] });
+  }
+  if (!covers.length) {
+    if (placeholder || !insert || !source.trim()) return original;
+    const alt = plan?.cover?.copy ? '封面：' + plan.cover.copy : '封面';
+    return imageMarker(alt, target, '') + '\n\n' + source.replace(/^\n+/, '');
+  }
+  const first = covers[0];
+  const alreadyFirst = lines.slice(0, first.index).every(line => !line.trim());
+  const moved = [imageMarker(first.alt, target, first.caption)];
+  const remove = new Set();
+  for (const item of covers.slice(1)) {
+    remove.add(item.index);
+    const caption = captionAfter(lines, flags, item.index);
+    if (caption >= 0) {
+      for (let index = item.index + 1; index <= caption; index += 1) remove.add(index);
+    }
+  }
+  if (alreadyFirst) {
+    return lines
+      .map((line, index) => index === first.index ? moved[0] : (remove.has(index) ? null : line))
+      .filter(line => line !== null)
+      .join('\n');
+  }
+  const caption = captionAfter(lines, flags, first.index);
+  if (caption >= 0) {
+    moved.push('', lines[caption]);
+    for (let index = first.index + 1; index <= caption; index += 1) remove.add(index);
+  }
+  const rest = lines
+    .filter((_line, index) => index !== first.index && !remove.has(index))
+    .join('\n')
+    .replace(/^\n+/, '');
+  return moved.join('\n') + '\n\n' + rest;
+}
+
+export function rewriteImageMarkersWithMapping(markdown, plan, mapping = {}, { cover = '', insertCover = true, invalidCover = 'keep' } = {}) {
+  const items = Array.isArray(plan?.items) ? plan.items : [];
   let cursor = 0;
-  return String(markdown || '').replace(/^!\[(.*?)\]\(\s*(\S+?)(?:\s+["“'‘](.*?)["”'’])?\s*\)$/gm, (line, alt, _src, caption) => {
-    if (cursor >= plan.items.length) return line;
-    const item = plan.items[cursor];
+  const rewritten = mapLinesOutsideCode(markdown, line => {
+    const match = line.match(IMAGE_LINE);
+    if (!match) return line;
+    const alt = match[1];
+    if (isCoverImageAlt(alt)) return line;
+    if (cursor >= items.length) return line;
+    const item = items[cursor];
     if (item.alt !== alt) return line;
     cursor += 1;
     const path = mapping[item.index];
     if (!path) return line;
-    const title = caption ? ' "' + String(caption).replaceAll('"', '\\"') + '"' : '';
-    return '![' + alt + '](' + path + title + ')';
+    return imageMarker(alt, path, match[3]);
   });
+  return rewriteCoverImageMarker(rewritten, cover, { insert: insertCover, plan, invalid: invalidCover });
 }
 
 export function mapGeneratedFiles(plan, entries) {

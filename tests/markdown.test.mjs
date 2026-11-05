@@ -47,6 +47,18 @@ test('cover detection uses the image type instead of any 封面 mention', () => 
   assert.match(result.html, /<img src="imgs\/body-01.jpg"/);
 });
 
+test('cover images join the article body once a real image is available', () => {
+  const rendered = renderMarkdown('![封面：配置台](cover.jpg)\n\n图注：封面说明', { styles: {} });
+  assert.match(rendered.html, /<img src="cover\.jpg"/);
+  assert.match(rendered.html, /封面说明/);
+  const themed = renderMarkdown('![封面：配置台](cover.jpg)', { styles: { img: 'aspect-ratio:16/9;' } });
+  assert.match(themed.html, /aspect-ratio:auto/);
+
+  const placeholder = renderMarkdown('![封面：配置台](placeholder)\n\n图注：稍后补图', { styles: {} });
+  assert.doesNotMatch(placeholder.html, /<img/);
+  assert.match(placeholder.html, /稍后补图/);
+});
+
 test('embed links use the same safe URL policy', () => {
   const embeds = {
     related_articles: { manual: [{ name: '危险', url: '//evil.example/a' }] },
@@ -69,6 +81,19 @@ test('image slots parse cover, type, source and caption', () => {
   assert.equal(slots[0].cover, true);
   assert.equal(slots[1].type, '信息图');
   assert.equal(slots[1].caption, '图：对比');
+});
+
+test('fenced code excludes image slots and renders as code', () => {
+  const source = '# 标题\n\n~~~md\n![封面：示例](cover.jpg)\n~~~\n\n````md\n```\n![信息图：示例](body.jpg)\n```\n````\n\n![信息图：真实](body-real.jpg)';
+  const slots = extractImageSlots(source);
+  assert.equal(slots.length, 1);
+  assert.equal(slots[0].alt, '信息图：真实');
+
+  const rendered = renderMarkdown(source, { styles: {} });
+  assert.equal((rendered.html.match(/<img/g) || []).length, 1);
+  assert.match(rendered.html, /body-real\.jpg/);
+  assert.match(rendered.html, /<pre/);
+  assert.doesNotMatch(rendered.html, /<img src="cover\.jpg"/);
 });
 
 test('preformat protects URLs and code while spacing CJK and Latin', () => {
