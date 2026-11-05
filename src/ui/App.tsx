@@ -326,6 +326,7 @@ export function App() {
             config={config}
             servers={servers}
             imageModels={imageModels}
+            accounts={accounts}
             preferences={preferences}
             notify={notify}
             onChanged={refreshProjects}

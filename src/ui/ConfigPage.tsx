@@ -6,6 +6,7 @@ import { exportBundle, saveBundle } from '../lib/bundle.mjs';
 import type { ImageModel, McpServer, McpTool, TextModel, Toast, WechatAccount } from './types';
 import { imageModelLabel } from '../lib/image-models.mjs';
 import { mcpServerStatusLabel } from '../lib/mcp-images.mjs';
+import { STICKER_LANGUAGES } from '../lib/stickers.mjs';
 import { normalizeConfigForSave } from '../lib/config.mjs';
 import type { StudioPreferences } from './preferences';
 
@@ -468,6 +469,11 @@ export function ConfigPage({
                 <Field label="封面形态"><input value={csv(draft.custom_cover_image_style)} onChange={event => update('custom_cover_image_style', parseCsv(event.target.value))} placeholder="留空则由文章内容自动选择" /></Field>
                 <Field label="正文配图形态"><input value={csv(draft.custom_article_image_style)} onChange={event => update('custom_article_image_style', parseCsv(event.target.value))} /></Field>
                 <Field label="贴图形态"><input value={csv(draft.custom_sticker_style)} onChange={event => update('custom_sticker_style', parseCsv(event.target.value))} /></Field>
+                <Field label="贴图主题语言" hint="统一控制贴图画面文字与逐图配文。">
+                  <select value={draft.sticker_language || '简体中文'} onChange={event => update('sticker_language', event.target.value)}>
+                    {STICKER_LANGUAGES.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+                  </select>
+                </Field>
                 <Field label="配图密度">
                   <select value={draft.image_density || '每节一图'} onChange={event => update('image_density', event.target.value)}>
                     {['每节一图', '按需配图', '少图', '多图'].map(value => <option key={value}>{value}</option>)}

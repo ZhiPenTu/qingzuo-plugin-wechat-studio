@@ -6,6 +6,28 @@ export function hasSavedCover(project) {
   return Boolean(cover) && project.entries.some(entry => entry.path === project.directory + '/' + cover && entry.kind === 'file');
 }
 
+export async function articlePublicationFingerprint(project) {
+  const html = project.files?.html || '';
+  const localSources = [...html.matchAll(/<img\b[^>]*\bsrc=["']([^"']+)["']/gi)]
+    .map(match => match[1])
+    .filter(source => !/^[a-z][a-z0-9+.-]*:/i.test(source) && !source.startsWith('//'))
+    .map(source => project.directory + '/' + source.replace(/^\.\//, ''));
+  const assets = [...new Set(localSources)].map(path => {
+    const entry = (project.entries || []).find(item => item.path === path && item.kind === 'file');
+    return entry ? { path, size: entry.size || 0, mtime: entry.mtime } : { path, missing: true };
+  }).sort((left, right) => left.path.localeCompare(right.path));
+  const payload = JSON.stringify({
+    title: project.article?.title || '',
+    author: project.article?.author || '',
+    digest: project.article?.digest || '',
+    cover: project.article?.cover_image || '',
+    html,
+    assets,
+  });
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
+  return [...new Uint8Array(digest)].map(value => value.toString(16).padStart(2, '0')).join('');
+}
+
 export function reviewIssueStage(category) {
   const value = String(category || '');
   if (['配图', '图片'].includes(value)) return 'images';

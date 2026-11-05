@@ -72,34 +72,44 @@ export async function createProject(api, { title, mode = 'full', source = '', in
   const stage = STAGES.some(item => item.id === initialStage) ? initialStage : 'topic';
   const root = normalizeDraftsRoot(draftsRoot);
   const directory = await uniqueArticleDirectory(api, title, date, root);
-  await api.workspace.mkdir({ path: directory });
-  await api.workspace.mkdir({ path: directory + '/imgs' });
-  await api.workspace.mkdir({ path: directory + '/imgs/prompts' });
-  const article = {
-    ...ARTICLE_DEFAULTS,
-    title,
-    author: '',
-    digest: '',
-    cover_image: 'cover.jpg',
-    content_source: 'article.html',
-  };
-  await api.workspace.writeText({ path: directory + '/article.yaml', text: serializeArticle(article), overwrite: false });
-  await api.workspace.writeText({
-    path: directory + '/pipeline.yaml',
-    text: pipelineText({ schemaVersion: 1, stage, status: 'active', mode, created: date.toISOString(), source, completed: [] }),
-    overwrite: false,
-  });
-  await api.workspace.writeText({
-    path: directory + '/closing.md',
-    text: '',
-    overwrite: false,
-  });
-  await api.workspace.writeText({
-    path: directory + '/stage-log.md',
-    text: '# 阶段日志\n\n- ' + date.toISOString() + ' 创建项目，进入「' + STAGES.find(item => item.id === stage).label + '」。\n',
-    overwrite: false,
-  });
-  return { directory, article, pipeline: { stage, status: 'active', mode, completed: [] } };
+  const ownerMarker = directory + '/.qz-owner';
+  const ownerToken = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+  let ownsDirectory = false;
+  try {
+    await api.workspace.mkdir({ path: directory });
+    await api.workspace.writeText({ path: ownerMarker, text: ownerToken, overwrite: false });
+    ownsDirectory = true;
+    await api.workspace.mkdir({ path: directory + '/imgs' });
+    await api.workspace.mkdir({ path: directory + '/imgs/prompts' });
+    const article = {
+      ...ARTICLE_DEFAULTS,
+      title,
+      author: '',
+      digest: '',
+      cover_image: 'cover.jpg',
+      content_source: 'article.html',
+    };
+    await api.workspace.writeText({ path: directory + '/article.yaml', text: serializeArticle(article), overwrite: false });
+    await api.workspace.writeText({
+      path: directory + '/pipeline.yaml',
+      text: pipelineText({ schemaVersion: 1, stage, status: 'active', mode, created: date.toISOString(), source, completed: [] }),
+      overwrite: false,
+    });
+    await api.workspace.writeText({
+      path: directory + '/closing.md',
+      text: '',
+      overwrite: false,
+    });
+    await api.workspace.writeText({
+      path: directory + '/stage-log.md',
+      text: '# 阶段日志\n\n- ' + date.toISOString() + ' 创建项目，进入「' + STAGES.find(item => item.id === stage).label + '」。\n',
+      overwrite: false,
+    });
+    return { directory, article, pipeline: { stage, status: 'active', mode, completed: [] } };
+  } catch (error) {
+    if (ownsDirectory) await api.workspace.remove({ path: directory, recursive: true }).catch(() => {});
+    throw error;
+  }
 }
 
 export async function readOptional(api, path) {
@@ -181,6 +191,28 @@ export async function listProjects(api, draftsRoot = 'drafts') {
     });
   }
   return projects;
+}
+
+export async function deleteProjectDirectory(api, directory) {
+  const target = String(directory || '').trim().replace(/\/+$/, '');
+  if (!/^drafts(?:\/[^\\:*?"<>|]+)+$/.test(target) || target.split('/').includes('..')) {
+    throw new Error('只能删除 drafts/ 下的文章项目。');
+  }
+  const parent = target.slice(0, target.lastIndexOf('/'));
+  const name = target.slice(target.lastIndexOf('/') + 1);
+  const tombstone = parent + '/.deleting-' + name + '-' + Date.now().toString(36)
+    + '-' + Math.random().toString(36).slice(2, 8);
+  await api.workspace.rename({ from: target, to: tombstone });
+  try {
+    await api.workspace.remove({ path: tombstone, recursive: true });
+  } catch (error) {
+    try {
+      await api.workspace.rename({ from: tombstone, to: target });
+    } catch {
+      throw new Error('删除失败，且无法恢复项目目录。请在工作区手动检查：' + tombstone);
+    }
+    throw error;
+  }
 }
 
 export async function saveStage(api, directory, stage, content, options = {}) {

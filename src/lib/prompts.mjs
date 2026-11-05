@@ -1,5 +1,6 @@
 import { mergedConfig } from './config.mjs';
 import { STAGE_FILES } from './project.mjs';
+import { normalizeStickerLanguage, stickerLanguageInstruction } from './stickers.mjs';
 
 export function configContext(config = {}, article = {}) {
   const merged = mergedConfig(config, article);
@@ -148,14 +149,19 @@ export function buildImagePrompt(plan, item = {}) {
 
 export function buildStickerPrompt(config = {}, options = {}) {
   const count = Math.max(1, Math.min(9, Number(options.count) || config.multi_image_count || 6));
+  const language = normalizeStickerLanguage(options.language || config.sticker_language);
   return {
     system: [
       '你是公众号贴图策划。先给出整组图方案，再逐图配文。',
       '一组图必须统一风格与媒介，但每张内容不同、顺序有叙事关系。',
+      '整组统一主题语言：' + language + '。' + stickerLanguageInstruction(language),
+      language === '无文字'
+        ? '画面提示词必须写清主体、场景、动作、构图和光线，但不得要求任何文字、字母或数字标签；避免通用模板。'
+        : '画面提示词必须写清主体、场景、动作、构图、光线和可见文字；避免通用模板。',
       '输出 JSON：{"title":"...","style":"...","images":[{"prompt":"...","caption":"..."}]}',
       '图片数量固定为 ' + count + '，不要输出 Markdown 代码围栏。',
     ].join('\n'),
-    user: '主题：' + String(options.topic || '') + '\n内容方向：' + String(config.topic_direction || '') + '\n请给整组方案与逐图配文。',
+    user: '主题：' + String(options.topic || '') + '\n内容方向：' + String(config.topic_direction || '') + '\n统一主题语言：' + language + '\n请给整组方案与逐图配文。',
   };
 }
 

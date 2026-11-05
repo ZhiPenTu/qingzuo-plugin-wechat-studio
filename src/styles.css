@@ -242,8 +242,11 @@ input::placeholder, textarea::placeholder { color: var(--qz-text-muted); opacity
 .project-row small { color: var(--qz-text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .project-stage { font-size: 11px; color: var(--qz-primary); background: var(--qz-primary-wash); padding: 3px 6px; border-radius: 4px; }
 .project-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 11px; }
-.project-card { min-height: 128px; border: 1px solid var(--qz-border); border-radius: 8px; background: var(--qz-surface); padding: 14px; text-align: left; display: grid; align-content: start; gap: 11px; }
+.project-card { min-height: 128px; border: 1px solid var(--qz-border); border-radius: 8px; background: var(--qz-surface); text-align: left; display: grid; align-content: start; overflow: hidden; }
 .project-card:hover { background: var(--qz-hover); }
+.project-card-open { width: 100%; border: 0; background: transparent; padding: 14px; text-align: left; display: grid; align-content: start; gap: 11px; }
+.project-card-actions { display: flex; justify-content: flex-end; padding: 0 14px 12px; }
+.project-delete { min-height: 27px; padding: 0 9px; font-size: 11px; }
 .project-card-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .project-card small { color: var(--qz-text-muted); }
 .project-card code { color: var(--qz-text-muted); font-size: 10.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -416,10 +419,22 @@ input::placeholder, textarea::placeholder { color: var(--qz-text-muted); opacity
 .media-stage img { max-width: 100%; max-height: 65vh; object-fit: contain; }
 
 .sticker-plan { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
-.sticker-item { border: 1px solid var(--qz-border); border-radius: 8px; padding: 12px; display: grid; gap: 10px; }
+.sticker-item { border: 1px solid var(--qz-border); border-radius: 8px; padding: 12px; display: grid; gap: 10px; align-content: start; }
+.sticker-item.has-media { grid-template-columns: minmax(0, 1fr) 156px; }
 .sticker-item header { display: flex; align-items: center; justify-content: space-between; }
+.sticker-item > header, .sticker-item-footer { grid-column: 1 / -1; }
+.sticker-item-title { display: flex; align-items: center; gap: 6px; }
 .sticker-item header div { display: flex; gap: 3px; }
 .sticker-item header button { width: 26px; height: 26px; border: 1px solid var(--qz-border); border-radius: 5px; background: var(--qz-surface); }
+.sticker-item-content { display: grid; gap: 10px; align-content: start; min-width: 0; }
+.sticker-item-media { min-width: 0; }
+.sticker-item-media figure { margin: 0; border: 1px solid var(--qz-border); border-radius: 7px; overflow: hidden; background: var(--qz-surface-subtle); }
+.sticker-item-media img { display: block; width: 100%; aspect-ratio: 1; object-fit: contain; background: #1b1b1b; }
+.sticker-item-media figcaption { padding: 7px; font-size: 10.5px; line-height: 1.45; color: var(--qz-text-muted); }
+.sticker-item-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding-top: 2px; }
+.sticker-item-footer small { min-width: 0; color: var(--qz-text-muted); font-size: 10.5px; line-height: 1.45; word-break: break-word; }
+.sticker-item-footer .button { flex: 0 0 auto; }
+.sticker-publish-panel { border-color: color-mix(in srgb, var(--qz-primary) 24%, var(--qz-border)); }
 .output-strip { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 14px 0; }
 .output-strip figure { margin: 0; border: 1px solid var(--qz-border); border-radius: 8px; overflow: hidden; background: var(--qz-surface); }
 .output-strip img { width: 100%; display: block; aspect-ratio: 1; object-fit: cover; }
@@ -460,6 +475,8 @@ input::placeholder, textarea::placeholder { color: var(--qz-text-muted); opacity
   .format-layout { grid-template-columns: minmax(0, 1fr) 390px; }
   .theme-preview-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .asset-image-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .sticker-plan { grid-template-columns: 1fr; }
+  .sticker-item.has-media { grid-template-columns: minmax(0, 1fr) 190px; }
 }
 
 @media (max-width: 820px) {
@@ -491,6 +508,9 @@ input::placeholder, textarea::placeholder { color: var(--qz-text-muted); opacity
   h1 { font-size: 19px; }
   .entry-grid, .quick-grid, .project-grid, .form-grid, .form-grid-3, .image-plan, .theme-preview-grid, .asset-image-grid, .output-strip { grid-template-columns: 1fr; }
   .plan-card.has-media { grid-template-columns: minmax(0, 1fr) 112px; }
+  .sticker-item.has-media { grid-template-columns: 1fr; }
+  .sticker-item-media { grid-column: 1 / -1; }
+  .sticker-item-footer { flex-direction: column; align-items: stretch; }
   .stage-rail { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .stage-step:nth-child(2n) { border-right: 0; }
   .stage-step { border-bottom: 1px solid var(--qz-border); }
