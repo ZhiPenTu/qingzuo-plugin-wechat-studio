@@ -88,6 +88,8 @@ export const ARTICLE_DEFAULTS = {
   cover_image: '',
   pic_crop_235_1: '',
   pic_crop_1_1: '',
+  cover_copy: '',
+  body_copies: {},
   content_source: 'article.html',
   need_open_comment: 1,
   only_fans_can_comment: 0,

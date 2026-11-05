@@ -6,6 +6,9 @@ import {
   IMAGE_MEDIA,
   chooseCoverStyle,
   chooseMedium,
+  coverCopy,
+  coverDescription,
+  bodyDescription,
   mapGeneratedFiles,
   planImages,
   rewriteCoverImageMarker,
@@ -379,4 +382,65 @@ test('partial generation keeps stable batch indexes instead of shifting later im
   ];
   const mapped = mapGeneratedFiles(plan, entries);
   assert.deepEqual(mapped.map(item => item.batchIndex), [1, 3]);
+});
+
+test('cover and body copy overrides update prompts and preserve markdown baseline', () => {
+  const source = `# 电商直播间开始售卖 token\n\n![封面](cover.jpg)\n\n导语：算力像水电一样进入千家万户。\n\n## 第一节：算力券的兑付\n\n![数据图表：三类补贴的作用环节与兑付路径](placeholder)\n\n正文第一节。\n\n## 第二节：算力节点分布\n\n![信息图：国家算力枢纽节点分布](placeholder)\n\n正文第二节。\n\n## 第三节：家庭使用场景\n\n![场景还原：普通家庭书桌上并排放置的电脑](placeholder)\n\n正文第三节。`;
+  const defaultPlan = planImages(source, {}, { title: '电商直播间开始售卖 token' });
+  assert.equal(defaultPlan.cover.defaultCopy, '电商直播间开始');
+  assert.equal(defaultPlan.cover.copy, '电商直播间开始');
+  assert.match(defaultPlan.cover.prompt, /电商直播间开始/);
+  assert.equal(defaultPlan.items.length, 3);
+  assert.equal(defaultPlan.items[0].style, '数据图表');
+  assert.equal(defaultPlan.items[0].alt, '数据图表：三类补贴的作用环节与兑付路径');
+  assert.equal(defaultPlan.items[1].alt, '信息图：国家算力枢纽节点分布');
+  assert.equal(defaultPlan.items[2].alt, '场景还原：普通家庭书桌上并排放置的电脑');
+
+  // 仅修改第三张图（index: 2），验证不会因为全局 slotIndex 串位污染前两张
+  const customizedPlan = planImages(source, {}, {
+    title: '电商直播间开始售卖 token',
+    cover_copy: '直播间卖算力了',
+    body_copies: { 2: '场景还原：书房晚间真实办公' },
+  });
+  assert.equal(customizedPlan.cover.copy, '直播间卖算力了');
+  assert.equal(customizedPlan.cover.defaultCopy, '电商直播间开始');
+  assert.match(customizedPlan.cover.prompt, /「直播间卖算力了」/);
+  assert.doesNotMatch(customizedPlan.cover.prompt, /「电商直播间开始」/);
+
+  // 第 0、1 项保持原样未串位
+  assert.equal(customizedPlan.items[0].alt, '数据图表：三类补贴的作用环节与兑付路径');
+  assert.equal(customizedPlan.items[1].alt, '信息图：国家算力枢纽节点分布');
+  // 第 2 项被精确自定义
+  assert.equal(customizedPlan.items[2].originalAlt, '场景还原：普通家庭书桌上并排放置的电脑');
+  assert.equal(customizedPlan.items[2].alt, '场景还原：书房晚间真实办公');
+  assert.match(customizedPlan.items[2].prompt, /图位说明：场景还原：书房晚间真实办公/);
+  assert.doesNotMatch(customizedPlan.items[1].prompt, /书房晚间真实办公/);
+
+  // 回写 Markdown 时保留 Markdown 中的基线说明，确保重载后基线和形态不发生突变
+  const rewritten = rewriteImageMarkersWithMapping(source, customizedPlan, {
+    0: 'imgs/body-01.jpg',
+    1: 'imgs/body-02.jpg',
+    2: 'imgs/body-03.jpg',
+  }, { cover: 'cover.jpg' });
+  assert.match(rewritten, /!\[场景还原：普通家庭书桌上并排放置的电脑\]\(imgs\/body-03\.jpg\)/);
+
+  // 再次从回写的 Markdown 重新规划，并叠加上述自定义文案，形态与提示词保持高度稳定
+  const reloadedPlan = planImages(rewritten, {}, {
+    title: '电商直播间开始售卖 token',
+    cover_copy: '直播间卖算力了',
+    body_copies: { 2: '场景还原：书房晚间真实办公' },
+  });
+  assert.equal(reloadedPlan.items[0].style, '数据图表');
+  assert.equal(reloadedPlan.items[2].originalAlt, '场景还原：普通家庭书桌上并排放置的电脑');
+  assert.equal(reloadedPlan.items[2].alt, '场景还原：书房晚间真实办公');
+
+  // 模拟重置第三张图：重置后完全恢复为基线形态与提示词
+  const resetPlan = planImages(rewritten, {}, {
+    title: '电商直播间开始售卖 token',
+    cover_copy: '',
+    body_copies: {},
+  });
+  assert.equal(resetPlan.cover.copy, '电商直播间开始');
+  assert.equal(resetPlan.items[2].alt, '场景还原：普通家庭书桌上并排放置的电脑');
+  assert.match(resetPlan.items[2].prompt, /图位说明：普通家庭书桌上并排放置的电脑/);
 });
