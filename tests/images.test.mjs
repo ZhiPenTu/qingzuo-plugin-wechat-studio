@@ -52,6 +52,7 @@ test('image plan separates cover and body slots with real content prompts', () =
   assert.equal(plan.items.length, 2);
   assert.equal(plan.items[0].style, '流程步骤');
   assert.equal(plan.items[0].role, '信息位');
+  assert.equal(plan.items[0].src, 'placeholder');
   assert.equal(plan.items[1].role, '节奏位');
   assert.equal(plan.prompts.length, 3);
 });

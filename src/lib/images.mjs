@@ -192,6 +192,7 @@ export function planImages(markdown, config = {}, article = {}) {
       slotIndex: slot.index,
       index,
       alt: slot.alt,
+      src: slot.src,
       type: slot.type,
       caption: slot.caption,
       style,

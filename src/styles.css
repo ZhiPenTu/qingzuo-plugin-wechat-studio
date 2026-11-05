@@ -194,6 +194,8 @@ input::placeholder, textarea::placeholder { color: var(--qz-text-muted); opacity
 .button-primary { background: var(--qz-primary); color: var(--qz-on-primary); border-color: var(--qz-primary); }
 .button-primary:hover:not(:disabled) { background: var(--qz-primary-hover); border-color: var(--qz-primary-hover); }
 .button-ghost { border-color: transparent; background: transparent; color: var(--qz-text-muted); }
+.fix-button { min-height: 26px; padding: 0 8px; font-size: 11.5px; }
+.issue .fix-button, .gate-list .fix-button { margin-top: 7px; }
 .button-danger { color: var(--qz-danger); border-color: color-mix(in srgb, var(--qz-danger) 40%, var(--qz-border)); background: var(--qz-danger-surface); }
 .icon-button { width: 28px; height: 28px; border: 0; border-radius: 5px; background: transparent; font-size: 20px; line-height: 1; }
 .icon-button:hover { background: var(--qz-hover); }
@@ -211,6 +213,7 @@ input::placeholder, textarea::placeholder { color: var(--qz-text-muted); opacity
 .notice { border: 1px solid var(--qz-border); border-radius: 7px; padding: 10px 12px; margin: 12px 0; background: var(--qz-surface-subtle); }
 .notice p { margin: 0; }
 .notice p + p { margin-top: 5px; }
+.notice ul { margin: 6px 0 0; padding-left: 20px; }
 .notice.warning { background: var(--qz-warning-surface); border-color: color-mix(in srgb, var(--qz-warning) 25%, var(--qz-border)); color: var(--qz-warning); }
 .notice.info { background: var(--qz-primary-wash); }
 .notice.danger { background: var(--qz-danger-surface); color: var(--qz-danger); }
@@ -293,6 +296,7 @@ input::placeholder, textarea::placeholder { color: var(--qz-text-muted); opacity
 
 .image-plan { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 14px 0; }
 .plan-card { border: 1px solid var(--qz-border); border-radius: 8px; padding: 13px; background: var(--qz-surface); display: grid; gap: 8px; align-content: start; }
+.plan-card-pending { border-color: color-mix(in srgb, var(--qz-warning) 35%, var(--qz-border)); background: var(--qz-warning-surface); }
 .cover-plan { background: var(--qz-primary-wash); }
 .plan-card p { margin: 0; color: var(--qz-text-muted); font-size: 12px; }
 .plan-card-top { display: flex; gap: 5px; }

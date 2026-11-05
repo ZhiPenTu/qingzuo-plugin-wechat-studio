@@ -2,6 +2,12 @@ import { substituteTheme } from './styles.mjs';
 
 export const INFO_SLOT_FORMS = new Set(['信息图', '实证', '流程图', '对比']);
 
+export function isCoverImageAlt(alt) {
+  const value = String(alt || '');
+  const type = (value.includes('：') ? value.split('：', 1)[0].trim() : value.split(':', 1)[0].trim()).toLowerCase();
+  return type === '封面' || type === 'cover';
+}
+
 function escapeHtml(value) {
   return String(value ?? '')
     .replaceAll('&', '&amp;')
@@ -92,7 +98,7 @@ export function extractImageSlots(markdown, { captionStyle = '有图注' } = {})
     if (!match) continue;
     const alt = match[1];
     const type = alt.includes('：') ? alt.split('：', 1)[0].trim() : alt.split(':', 1)[0].trim();
-    const cover = type === '封面' || alt.startsWith('cover');
+    const cover = isCoverImageAlt(alt);
     const caption = (match[3] || '').trim();
     slots.push({
       alt,
@@ -540,7 +546,7 @@ export function renderMarkdown(markdown, options = {}) {
         continue;
       }
       const caption = (image[3] || '').trim();
-      if (alt.includes('封面') || alt.startsWith('cover')) continue;
+      if (isCoverImageAlt(alt)) continue;
       const imageStyle = styles.img || 'max-width:100%; border-radius:4px;';
       let imageHtml = '<p style="text-align:center; margin:1.5em 0;"><img src="' + escapeAttr(safeSource) + '"' + imageDims(safeSource) +
         ' alt="' + escapeAttr(alt) + '" style="' + escapeAttr(imageStyle) + '" /></p>';

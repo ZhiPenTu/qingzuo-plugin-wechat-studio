@@ -1,9 +1,35 @@
 import { checkDraft, splitMarkdownBlocks } from './writing.mjs';
+import { isCoverImageAlt } from './markdown.mjs';
 
 const SEVERITY_ORDER = { block: 0, warning: 1, suggestion: 2 };
+const PLACEHOLDER_PATTERN = /!\[([^\]]*)\]\(\s*(placeholder(?:-[^)\s]+)?)(?:\s+["“'‘].*?["”'’])?\s*\)/g;
 
 function issue(level, category, message, excerpt = '', signal = '') {
   return { level, category, message, excerpt: String(excerpt || '').slice(0, 160), ...(signal ? { signal } : {}) };
+}
+
+export function findImagePlaceholders(markdown) {
+  return visibleMarkdown(markdown).split('\n').flatMap(line =>
+    [...line.matchAll(PLACEHOLDER_PATTERN)].map(match => ({
+      alt: match[1],
+      src: match[2],
+      markdown: match[0],
+    })),
+  );
+}
+
+function visibleMarkdown(markdown) {
+  const lines = [];
+  let fenced = false;
+  for (const rawLine of String(markdown || '').split('\n')) {
+    if (/^\s*```/.test(rawLine)) {
+      fenced = !fenced;
+      continue;
+    }
+    if (fenced) continue;
+    lines.push(rawLine.replace(/(`+)([\s\S]*?)\1/g, ''));
+  }
+  return lines.join('\n');
 }
 
 function bodyText(markdown) {
@@ -214,9 +240,10 @@ export function reviewArticle(markdown, config = {}, extras = {}) {
     for (const match of [...new Set(matches)].slice(0, 5)) issues.push(issue('warning', '错别字', message, match));
   }
 
-  const links = matchesOf(source, /\]\((https?:\/\/[^)\s]+)\)/g);
+  const visible = visibleMarkdown(source);
+  const links = matchesOf(visible, /\]\((https?:\/\/[^)\s]+)\)/g);
   if (links.length > 10) issues.push(issue('warning', '链接', '正文有 ' + links.length + ' 个外链，发布前请逐一确认可访问。'));
-  const externalImages = matchesOf(source, /!\[[^\]]*\]\((https?:\/\/[^)\s]+)/g);
+  const externalImages = matchesOf(visible, /!\[[^\]]*\]\((https?:\/\/[^)\s]+)/g);
   if (externalImages.length) issues.push(issue('block', '图片', '正文仍含外链图片，发布前必须换成本地图片。'));
 
   const requiredReview = Array.isArray(config.review_required) ? config.review_required : [];
@@ -227,8 +254,17 @@ export function reviewArticle(markdown, config = {}, extras = {}) {
     issues.push(issue('suggestion', '链接', '已检查 ' + links.length + ' 个正文链接，请确认均为可信来源。'));
   }
 
-  const placeholders = matchesOf(source, /!\[[^\]]*\]\((?:placeholder|placeholder-[^)\s]+)\)/g);
-  if (placeholders.length) issues.push(issue('warning', '配图', '仍有 ' + placeholders.length + ' 个配图占位符，排版或配图后才能发布。'));
+  const cover = String(extras.cover || '').trim();
+  const placeholders = findImagePlaceholders(source)
+    .filter(item => !(cover && isCoverImageAlt(item.alt)));
+  if (placeholders.length) {
+    issues.push(issue(
+      'warning',
+      '配图',
+      '仍有 ' + placeholders.length + ' 个配图占位符，排版或配图后才能发布。',
+      placeholders[0].markdown,
+    ));
+  }
 
   if (extras.html) {
     if (/<script\b|javascript:|on\w+\s*=|<iframe\b|<object\b/i.test(extras.html)) {

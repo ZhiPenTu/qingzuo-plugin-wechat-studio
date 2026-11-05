@@ -112,3 +112,39 @@ test('review markdown contains counts and actionable labels', () => {
   assert.match(markdown, /阻断 0/);
   assert.match(markdown, /内容审稿/);
 });
+
+test('cover placeholder is ignored when a cover is supplied', () => {
+  const text = clean + '\n![封面：规整的配置台](placeholder)\n';
+  const pending = reviewArticle(text, { target_word_count: '10-500' });
+  assert.equal(pending.issues.filter(item => item.category === '配图').length, 1);
+
+  const resolved = reviewArticle(text, { target_word_count: '10-500' }, { cover: 'cover-123.jpg' });
+  assert.equal(resolved.issues.some(item => item.category === '配图'), false);
+});
+
+test('body placeholder keeps a warning with the exact marker', () => {
+  const text = clean + '\n![封面：规整的配置台](placeholder)\n![信息图：四步流程](placeholder "图：四步完成")\n';
+  const result = reviewArticle(text, { target_word_count: '10-500' }, { cover: 'cover-123.jpg' });
+  const warning = result.issues.find(item => item.category === '配图');
+  assert.equal(warning.level, 'warning');
+  assert.match(warning.message, /1 个配图占位符/);
+  assert.equal(warning.excerpt, '![信息图：四步流程](placeholder "图：四步完成")');
+});
+
+test('body image alt containing 封面 is still a body placeholder', () => {
+  const text = clean + '\n![信息图：封面区域布局](placeholder)\n';
+  const result = reviewArticle(text, { target_word_count: '10-500' }, { cover: 'cover-123.jpg' });
+  assert.equal(result.issues.filter(item => item.category === '配图').length, 1);
+});
+
+test('placeholders inside code fences or inline code are ignored', () => {
+  const text = clean + '\n```md\n![信息图：示例](placeholder)\n```\n\n行内示例 `![信息图：示例](placeholder)` 与 ``![信息图：双反引号](placeholder)`` 不是图片。\n';
+  const result = reviewArticle(text, { target_word_count: '10-500' });
+  assert.equal(result.issues.some(item => item.category === '配图'), false);
+});
+
+test('external images inside code blocks do not block publication', () => {
+  const text = clean + '\n```md\n![示例](https://example.com/a.png)\n```\n';
+  const result = reviewArticle(text, { target_word_count: '10-500' });
+  assert.equal(result.issues.some(item => item.category === '图片' && item.level === 'block'), false);
+});

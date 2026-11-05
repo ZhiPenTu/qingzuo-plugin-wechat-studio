@@ -5,7 +5,13 @@ import { callWorker } from './worker-client';
 import { McpPanel } from './McpPanel';
 import { buildReviewPrompt, buildTopicPrompt, buildWritingPrompt } from '../lib/prompts.mjs';
 import { checkDraft, extractBoldOutline, stripCitations } from '../lib/writing.mjs';
-import { aiReviewSupplement, formatReviewMarkdown, mergeReviewMarkdown, reviewArticle } from '../lib/review.mjs';
+import {
+  aiReviewSupplement,
+  formatReviewMarkdown,
+  mergeReviewMarkdown,
+  reviewArticle,
+} from '../lib/review.mjs';
+import { buildPublicationGate, hasSavedCover, reviewIssueStage } from '../lib/publication.mjs';
 import {
   BODY_STYLES,
   COVER_STYLES,
@@ -178,6 +184,13 @@ function ProjectWorkspace({
     }
   }
 
+  function focusMeta(field: 'title' | 'author' | 'digest') {
+    const target = document.querySelector<HTMLElement>('[data-meta-field="' + field + '"]');
+    if (!target) return;
+    target.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    window.setTimeout(() => target.focus(), 250);
+  }
+
   return (
     <div className="page project-page">
       <header className="page-header project-header">
@@ -221,7 +234,17 @@ function ProjectWorkspace({
           ) : active === 'images' ? (
             <ImagesStage key={project.directory} project={project} config={config} servers={servers} imageModels={imageModels} modelId={preferences.imageModelId} notify={notify} onSaved={() => void advance('images', { next: false })} onNext={() => void advance('images')} onReload={onReload} />
           ) : active === 'final' ? (
-            <FinalStage project={project} config={config} accounts={accounts} notify={notify} onSaved={() => void advance('final', { next: false })} onNext={() => void advance('final')} />
+            <FinalStage
+              project={project}
+              config={config}
+              accounts={accounts}
+              notify={notify}
+              onSaved={() => void advance('final', { next: false })}
+              onNext={() => void advance('final')}
+              onGoStage={setActive}
+              onEditMeta={focusMeta}
+              onGoConfig={onGoConfig}
+            />
           ) : (
             <PublishStage project={project} config={config} accounts={accounts} accountId={preferences.wechatAccountId} notify={notify} onSaved={() => void advance('publish', { next: false })} />
           )}
@@ -290,10 +313,10 @@ function MetaEditor({
   }
   return (
     <div className="meta-form">
-      <Field label="标题"><input value={title} maxLength={64} onChange={event => setTitle(event.target.value)} /></Field>
-      <Field label="作者"><input value={author} maxLength={32} onChange={event => setAuthor(event.target.value)} /></Field>
+      <Field label="标题"><input data-meta-field="title" value={title} maxLength={64} onChange={event => setTitle(event.target.value)} /></Field>
+      <Field label="作者"><input data-meta-field="author" value={author} maxLength={32} onChange={event => setAuthor(event.target.value)} /></Field>
       <Field label="摘要" hint="最多 120 字，显示在分享卡片和列表页。">
-        <textarea value={digest} maxLength={120} rows={3} onChange={event => setDigest(event.target.value)} />
+        <textarea data-meta-field="digest" value={digest} maxLength={120} rows={3} onChange={event => setDigest(event.target.value)} />
       </Field>
       <Button type="button" variant="primary" onClick={() => void save()} busy={busy}>保存元数据</Button>
     </div>
@@ -696,7 +719,10 @@ function ReviewStage({
   );
 }
 
-function ReviewSummary({ review }: { review: any }) {
+function ReviewSummary({ review, fixFor }: {
+  review: any;
+  fixFor?: (issue: any) => { label: string; onClick: () => void } | null;
+}) {
   return (
     <div className="review-summary">
       <div className="review-stats">
@@ -706,12 +732,20 @@ function ReviewSummary({ review }: { review: any }) {
       </div>
       {review.issues.length ? (
         <div className="issue-list">
-          {review.issues.map((item: any, index: number) => (
-            <article key={index} className={'issue issue-' + item.level}>
-              <span>{item.level === 'block' ? '阻断' : item.level === 'warning' ? '警告' : '建议'}</span>
-              <div><strong>{item.category}</strong><p>{item.message}</p>{item.excerpt ? <blockquote>{item.excerpt}</blockquote> : null}</div>
-            </article>
-          ))}
+          {review.issues.map((item: any, index: number) => {
+            const fix = item.level === 'suggestion' ? null : fixFor?.(item) || null;
+            return (
+              <article key={index} className={'issue issue-' + item.level}>
+                <span>{item.level === 'block' ? '阻断' : item.level === 'warning' ? '警告' : '建议'}</span>
+                <div>
+                  <strong>{item.category}</strong>
+                  <p>{item.message}</p>
+                  {item.excerpt ? <blockquote>{item.excerpt}</blockquote> : null}
+                  {fix ? <Button type="button" variant="ghost" className="fix-button" onClick={fix.onClick}>{fix.label}</Button> : null}
+                </div>
+              </article>
+            );
+          })}
         </div>
       ) : <p className="quiet">未发现需要修改的问题。</p>}
     </div>
@@ -1341,6 +1375,7 @@ function ImagesStage({
 
   const retryable = batch?.items?.filter((item: any) => ['failed', 'save-failed'].includes(item.state)) || [];
   const unknown = batch?.items?.filter((item: any) => item.state === 'unknown') || [];
+  const pendingSlots = (plan?.items || []).filter((item: any) => /^placeholder(?:-|$)/i.test(String(item.src || '')));
 
   async function saveSelection() {
     const patch: Record<string, string> = {};
@@ -1403,10 +1438,14 @@ function ImagesStage({
               <details><summary>提示词</summary><pre>{plan.cover.prompt}</pre></details>
             </article>
             {plan.items.map((item: any) => (
-              <article className="plan-card" key={item.index}>
+              <article
+                className={'plan-card' + (/^placeholder(?:-|$)/i.test(String(item.src || '')) ? ' plan-card-pending' : '')}
+                key={item.index}
+              >
                 <span className="plan-card-top">
                   <Badge tone={item.role === '信息位' ? 'warning' : 'neutral'}>{item.role}</Badge>
                   <Badge tone="neutral">{item.style}</Badge>
+                  {/^placeholder(?:-|$)/i.test(String(item.src || '')) ? <Badge tone="warning">待补图</Badge> : null}
                 </span>
                 <strong>{item.alt}</strong>
                 <p>{item.generate ? '将生成' : '需要你提供真实截图或照片'}</p>
@@ -1415,6 +1454,13 @@ function ImagesStage({
             ))}
           </div>
           {plan.warnings.length ? <div className="notice warning">{plan.warnings.map((item: string) => <p key={item}>{item}</p>)}</div> : null}
+          {pendingSlots.length ? (
+            <div className="notice warning">
+              <p>还有 {pendingSlots.length} 个正文图位没有图片，进入终审后会被标记为未通过：</p>
+              <ul>{pendingSlots.map((item: any) => <li key={item.index}>{item.alt}</li>)}</ul>
+              <p>可以重新生成图片，或到排版阶段删除不需要的图位。</p>
+            </div>
+          ) : null}
         </>
       ) : <div className="loading-inline"><span className="spinner" /> 正在规划图片…</div>}
       {message ? <div className="notice info">{message}</div> : null}
@@ -1505,17 +1551,48 @@ function batchState(state: string) {
 }
 
 function FinalStage({
-  project, config, accounts, notify, onSaved, onNext,
+  project, config, accounts, notify, onSaved, onNext, onGoStage, onEditMeta, onGoConfig,
 }: {
   project: ArticleProject; config: Record<string, any>; accounts: WechatAccount[]; notify: Notify;
   onSaved: () => void; onNext: () => void;
+  onGoStage: (stage: string) => void;
+  onEditMeta: (field: 'title' | 'author' | 'digest') => void;
+  onGoConfig: () => void;
 }) {
   const [review, setReview] = useState<any>(null);
   const [busy, setBusy] = useState(false);
   const gate = buildPublicationGate(project, review);
   useEffect(() => {
-    setReview(reviewArticle(project.files.format || project.files.writing, config, { html: project.files.html, title: project.article.title }));
-  }, [project.directory, project.files.format, project.files.html, config]);
+    setReview(reviewArticle(project.files.format || project.files.writing, config, {
+      html: project.files.html,
+      title: project.article.title,
+      cover: hasSavedCover(project) ? project.article.cover_image : '',
+    }));
+  }, [project.directory, project.files.format, project.files.html, project.article.title, project.article.cover_image, project.entries, config]);
+
+  function gateFix(item: any) {
+    if (item.ok) return null;
+    if (item.meta) {
+      return { label: '编辑' + item.label, onClick: () => onEditMeta(item.meta) };
+    }
+    if (item.stage === 'meta-title') {
+      return { label: '编辑标题', onClick: () => onEditMeta('title') };
+    }
+    if (item.stage === 'config') {
+      return { label: '去配置中心', onClick: onGoConfig };
+    }
+    if (item.stage) {
+      return { label: '去' + STAGE_LABELS[item.stage] + '处理', onClick: () => onGoStage(item.stage) };
+    }
+    return null;
+  }
+
+  function issueFix(item: any) {
+    const stage = reviewIssueStage(item.category);
+    if (stage === 'meta-title') return { label: '编辑标题', onClick: () => onEditMeta('title') };
+    if (stage === 'config') return { label: '去配置中心', onClick: onGoConfig };
+    return stage ? { label: '去' + STAGE_LABELS[stage] + '处理', onClick: () => onGoStage(stage) } : null;
+  }
 
   async function save(next: boolean) {
     setBusy(true);
@@ -1538,48 +1615,33 @@ function FinalStage({
     <div>
       <StageHeader title="终审" description="检查标题、作者、摘要、封面、HTML、正文图片、占位符、嵌入定义和阻断级审稿项。" />
       <div className="gate-list">
-        {gate.items.map(item => (
-          <div key={item.label} className={item.ok ? 'gate-ok' : 'gate-block'}>
-            <span aria-hidden="true">{item.ok ? '✓' : '!'}</span>
-            <div><strong>{item.label}</strong>{item.detail ? <small>{item.detail}</small> : null}</div>
-          </div>
-        ))}
+        {gate.items.map(item => {
+          const fix = gateFix(item);
+          return (
+            <div key={item.label} className={item.ok ? 'gate-ok' : 'gate-block'}>
+              <span aria-hidden="true">{item.ok ? '✓' : '!'}</span>
+              <div>
+                <strong>{item.label}</strong>
+                {item.detail ? <small>{item.detail}</small> : null}
+                {fix ? <Button type="button" variant="ghost" className="fix-button" onClick={fix.onClick}>{fix.label}</Button> : null}
+              </div>
+            </div>
+          );
+        })}
       </div>
-      {review ? <ReviewSummary review={review} /> : null}
+      {review ? <ReviewSummary review={review} fixFor={issueFix} /> : null}
       {!accounts.length ? <div className="notice warning">尚未在底座设置中添加公众号账号。终审仍可完成，但无法创建草稿。</div> : null}
       <div className="toolbar toolbar-end">
-        <Button type="button" onClick={() => setReview(reviewArticle(project.files.format || project.files.writing, config, { html: project.files.html, title: project.article.title }))}>重新检查</Button>
+        <Button type="button" onClick={() => setReview(reviewArticle(project.files.format || project.files.writing, config, {
+          html: project.files.html,
+          title: project.article.title,
+          cover: hasSavedCover(project) ? project.article.cover_image : '',
+        }))}>重新检查</Button>
         <Button type="button" onClick={() => void save(false)} busy={busy}>仅保存终审</Button>
         <Button type="button" variant="primary" onClick={() => void save(true)} busy={busy}>通过终审，进入发布</Button>
       </div>
     </div>
   );
-}
-
-function buildPublicationGate(project: ArticleProject, review: any) {
-  const title = String(project.article.title || '').trim();
-  const author = String(project.article.author || '').trim();
-  const digest = String(project.article.digest || '').trim();
-  const cover = String(project.article.cover_image || '').trim();
-  const html = project.files.html || '';
-  const hasCover = Boolean(cover) && project.entries.some(entry => entry.path === project.directory + '/' + cover && entry.kind === 'file');
-  const localImages = [...html.matchAll(/<img[^>]+src=["']([^"']+)["']/gi)].map(match => match[1]).filter(src => !/^https?:/i.test(src));
-  const externalImages = [...html.matchAll(/<img[^>]+src=["'](https?:\/\/[^"']+)["']/gi)];
-  const missingImages = localImages.filter(src => !project.entries.some(entry => entry.path === project.directory + '/' + src.replace(/^\.\//, '') && entry.kind === 'file'));
-  const placeholders = /placeholder|qingzuo-asset:/i.test(html);
-  const embeds = /\{embed:\w+:[^}]+\}/.test(html);
-  const items = [
-    { label: '标题', ok: Boolean(title) && [...title].length <= 64, detail: title ? [...title].length + ' 字' : '未填写' },
-    { label: '作者', ok: Boolean(author) && [...author].length <= 32, detail: author || '未填写' },
-    { label: '摘要', ok: Boolean(digest) && [...digest].length <= 120, detail: digest ? [...digest].length + ' 字' : '未填写' },
-    { label: '封面', ok: hasCover, detail: cover || '未设置' },
-    { label: '当前 HTML', ok: Boolean(html) && html.length > 100, detail: html ? html.length + ' 字符' : '尚未排版' },
-    { label: '正文图片', ok: externalImages.length === 0 && missingImages.length === 0, detail: externalImages.length ? '仍有外链图片' : missingImages.length ? '缺少：' + missingImages.join('、') : localImages.length + ' 张本地图片' },
-    { label: '占位符', ok: !placeholders, detail: placeholders ? '仍有未处理占位符' : '已清理' },
-    { label: '嵌入定义', ok: !embeds, detail: embeds ? '仍有未解析的 {embed:…}' : '已解析' },
-    { label: '阻断级审稿项', ok: review ? review.counts.block === 0 : false, detail: review ? review.counts.block + ' 项' : '尚未检查' },
-  ];
-  return { ok: items.every(item => item.ok), items };
 }
 
 async function publicationFingerprint(project: ArticleProject) {
@@ -1626,7 +1688,11 @@ function PublishStage({
   const [status, setStatus] = useState<any>(null);
   const [busy, setBusy] = useState(false);
   const [archive, setArchive] = useState(false);
-  const review = reviewArticle(project.files.format || project.files.writing, config, { html: project.files.html, title: project.article.title });
+  const review = reviewArticle(project.files.format || project.files.writing, config, {
+    html: project.files.html,
+    title: project.article.title,
+    cover: hasSavedCover(project) ? project.article.cover_image : '',
+  });
   const gate = buildPublicationGate(project, review);
   const publishMethod = String(project.article.publish_method || config.publish_method || 'draft');
   const draftEnabled = publishMethod !== 'none';
@@ -1770,7 +1836,11 @@ function PublishStage({
       notify('上次发布结果未知，请先查询状态或在公众号后台核对，禁止重复提交。', 'warning');
       return;
     }
-    const latestReview = reviewArticle(project.files.format || project.files.writing, config, { html: project.files.html, title: project.article.title });
+    const latestReview = reviewArticle(project.files.format || project.files.writing, config, {
+      html: project.files.html,
+      title: project.article.title,
+      cover: hasSavedCover(project) ? project.article.cover_image : '',
+    });
     const latestGate = buildPublicationGate(project, latestReview);
     if (!latestGate.ok) {
       notify('发布前门禁未通过，请重新检查文章、封面和审稿问题。', 'warning');

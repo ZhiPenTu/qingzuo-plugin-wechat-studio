@@ -5,6 +5,7 @@ import path from 'node:path';
 import YAML from 'yaml';
 import {
   extractImageSlots,
+  isCoverImageAlt,
   preformatMarkdown,
   renderMarkdown,
   renderMarkdownDocument,
@@ -33,6 +34,17 @@ test('unsafe link and image protocols are rejected', () => {
   const networkPath = renderMarkdown('[外部](//evil.example/a)\n\n![x](//evil.example/a.png)\n\n[越界](../secret.md)', { styles: {} });
   assert.doesNotMatch(networkPath.html, /evil\.example/);
   assert.doesNotMatch(networkPath.html, /secret\.md/);
+});
+
+test('cover detection uses the image type instead of any 封面 mention', () => {
+  assert.equal(isCoverImageAlt('封面：配置台'), true);
+  assert.equal(isCoverImageAlt('cover: 配置台'), true);
+  assert.equal(isCoverImageAlt('Cover：配置台'), true);
+  assert.equal(isCoverImageAlt('信息图：封面区域布局'), false);
+  assert.equal(isCoverImageAlt('coverage: product launch'), false);
+
+  const result = renderMarkdown('![信息图：封面区域布局](imgs/body-01.jpg)', { styles: {} });
+  assert.match(result.html, /<img src="imgs\/body-01.jpg"/);
 });
 
 test('embed links use the same safe URL policy', () => {
