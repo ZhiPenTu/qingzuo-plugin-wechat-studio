@@ -91,6 +91,13 @@ const STAGE_LABELS: Record<string, string> = {
   format: '排版', images: '配图', final: '终审', publish: '草稿/发布',
 };
 
+const PROJECT_FILES = [
+  'article.yaml', 'topic-card.md', 'research.md', 'draft.md',
+  'review.md', 'article.md', 'article.html', 'stage-log.md',
+];
+
+type MetaField = 'title' | 'author' | 'digest';
+
 export function ProjectsPage({
   project,
   projects,
@@ -230,12 +237,33 @@ function ProjectWorkspace({
 }) {
   const [active, setActive] = useState(project.stage.id);
   const [deleting, setDeleting] = useState(false);
+  const [metaPanelOpen, setMetaPanelOpen] = useState(false);
+  const [pendingMetaFocus, setPendingMetaFocus] = useState<MetaField | null>(null);
   useEffect(() => {
     setActive(project.stage.id);
   }, [project.directory, project.stage.id]);
+  useEffect(() => {
+    if (!metaPanelOpen || !pendingMetaFocus) return;
+    const frame = window.requestAnimationFrame(() => {
+      const target = document.querySelector<HTMLElement>('[data-meta-field="' + pendingMetaFocus + '"]');
+      if (!target) {
+        setPendingMetaFocus(null);
+        return;
+      }
+      target.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      target.focus({ preventScroll: true });
+      setPendingMetaFocus(null);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [metaPanelOpen, pendingMetaFocus]);
 
   const progress = stageProgress(project.pipeline);
   const wordCount = checkDraft(project.files.writing || project.files.format || '', config).metrics.words;
+  const fileFacts = useMemo(() => PROJECT_FILES.map(file => ({
+    file,
+    saved: project.entries.some(entry => entry.path === project.directory + '/' + file),
+  })), [project.directory, project.entries]);
+  const savedFileCount = fileFacts.filter(item => item.saved).length;
 
   async function advance(stage: string, options: { next?: boolean } = {}) {
     try {
@@ -273,11 +301,9 @@ function ProjectWorkspace({
     }
   }
 
-  function focusMeta(field: 'title' | 'author' | 'digest') {
-    const target = document.querySelector<HTMLElement>('[data-meta-field="' + field + '"]');
-    if (!target) return;
-    target.scrollIntoView({ block: 'center', behavior: 'smooth' });
-    window.setTimeout(() => target.focus(), 250);
+  function focusMeta(field: MetaField) {
+    setMetaPanelOpen(true);
+    setPendingMetaFocus(field);
   }
 
   return (
@@ -302,11 +328,56 @@ function ProjectWorkspace({
             key={stage.id}
             className={['stage-step', stage.current ? 'current' : '', stage.completed ? 'completed' : '', active === stage.id ? 'viewing' : ''].filter(Boolean).join(' ')}
             onClick={() => setActive(stage.id)}
+            aria-current={active === stage.id ? 'step' : undefined}
           >
             <span>{stage.completed ? '✓' : index + 1}</span>
             <strong>{stage.label}</strong>
           </button>
         ))}
+      </div>
+
+      <div className="project-context">
+        <div className="project-context-summary">
+          <button
+            type="button"
+            className="project-context-toggle"
+            aria-expanded={metaPanelOpen}
+            aria-controls="project-context-panel"
+            onClick={() => {
+              if (metaPanelOpen) setPendingMetaFocus(null);
+              setMetaPanelOpen(open => !open);
+            }}
+          >
+            <span className="eyebrow">本篇信息</span>
+            <span className="project-context-title">{String(project.article.title || '未命名文章')}</span>
+            <span className="project-context-files">{savedFileCount}/{PROJECT_FILES.length} 个文件已保存</span>
+            <span className="project-context-action">{metaPanelOpen ? '收起' : '展开'}</span>
+          </button>
+          <NavActions active={active} onBack={() => setActive(previousStage(active))} onNext={() => setActive(nextStage(active))} />
+        </div>
+          <div className="project-context-panel" id="project-context-panel" hidden={!metaPanelOpen}>
+            <section>
+              <div className="project-context-section-heading">
+                <span className="panel-label">本篇元数据</span>
+                <span className="hint">标题、作者与摘要</span>
+              </div>
+              <MetaEditor project={project} notify={notify} onChanged={onChanged} onReload={onReload} />
+            </section>
+            <section>
+              <div className="project-context-section-heading">
+                <span className="panel-label">文件事实源</span>
+                <span className="hint">{savedFileCount}/{PROJECT_FILES.length} 已保存</span>
+              </div>
+              <ul className="file-facts">
+                {fileFacts.map(item => (
+                  <li key={item.file} className={item.saved ? 'is-saved' : ''}>
+                    <span className="file-fact-name">{item.file}</span>
+                    <Badge tone={item.saved ? 'success' : 'neutral'}>{item.saved ? '已保存' : '待生成'}</Badge>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          </div>
       </div>
 
       <div className="project-layout">
@@ -339,27 +410,6 @@ function ProjectWorkspace({
             <PublishStage project={project} config={config} accounts={accounts} accountId={preferences.wechatAccountId} notify={notify} onSaved={() => void advance('publish', { next: false })} />
           )}
         </section>
-
-        <aside className="project-aside">
-          <section>
-            <span className="eyebrow">本篇元数据</span>
-            <MetaEditor project={project} notify={notify} onChanged={onChanged} onReload={onReload} />
-          </section>
-          <section>
-            <span className="eyebrow">文件事实源</span>
-            <ul className="file-facts">
-              {['article.yaml', 'topic-card.md', 'research.md', 'draft.md', 'review.md', 'article.md', 'article.html', 'stage-log.md'].map(file => (
-                <li key={file}>
-                  <span>{file}</span>
-                  <Badge tone={project.entries.some(entry => entry.path === project.directory + '/' + file) ? 'success' : 'neutral'}>
-                    {project.entries.some(entry => entry.path === project.directory + '/' + file) ? '已保存' : '待生成'}
-                  </Badge>
-                </li>
-              ))}
-            </ul>
-          </section>
-          <NavActions active={active} onBack={() => setActive(previousStage(active))} onNext={() => setActive(nextStage(active))} />
-        </aside>
       </div>
     </div>
   );
@@ -367,10 +417,10 @@ function ProjectWorkspace({
 
 function NavActions({ active, onBack, onNext }: { active: string; onBack: () => void; onNext: () => void }) {
   return (
-    <section className="aside-nav">
+    <nav className="project-nav" aria-label="阶段导航">
       <Button type="button" onClick={onBack} disabled={active === 'topic'}>上一步</Button>
       <Button type="button" onClick={onNext} disabled={active === 'publish'}>查看下一步</Button>
-    </section>
+    </nav>
   );
 }
 
@@ -405,10 +455,14 @@ function MetaEditor({
     <div className="meta-form">
       <Field label="标题"><input data-meta-field="title" value={title} maxLength={64} onChange={event => setTitle(event.target.value)} /></Field>
       <Field label="作者"><input data-meta-field="author" value={author} maxLength={32} onChange={event => setAuthor(event.target.value)} /></Field>
-      <Field label="摘要" hint="最多 120 字，显示在分享卡片和列表页。">
-        <textarea data-meta-field="digest" value={digest} maxLength={120} rows={3} onChange={event => setDigest(event.target.value)} />
-      </Field>
-      <Button type="button" variant="primary" onClick={() => void save()} busy={busy}>保存元数据</Button>
+      <label className="field field-wide meta-digest">
+        <span className="field-label">摘要<span className="field-note">最多 120 字，显示在分享卡片和列表页</span></span>
+        <textarea data-meta-field="digest" value={digest} maxLength={120} rows={2} onChange={event => setDigest(event.target.value)} />
+      </label>
+      <div className="meta-actions">
+        <span className="hint">修改后需保存</span>
+        <Button type="button" variant="primary" onClick={() => void save()} busy={busy}>保存元数据</Button>
+      </div>
     </div>
   );
 }
@@ -842,6 +896,75 @@ function ReviewSummary({ review, fixFor }: {
   );
 }
 
+function PhoneDevice({ html, title }: { html: string; title: string }) {
+  const deviceRef = useRef<HTMLDivElement>(null);
+
+  useLayoutEffect(() => {
+    const device = deviceRef.current;
+    const slot = device?.parentElement;
+    if (!device || !slot || !slot.classList.contains('phone-preview-slot')) return;
+    const fit = () => {
+      const widthScale = Math.min(1, slot.clientWidth / 402);
+      device.style.transform = widthScale < 1 ? 'scale(' + widthScale + ')' : '';
+      slot.style.height = device.offsetHeight * widthScale + 'px';
+    };
+    const observer = new ResizeObserver(fit);
+    observer.observe(slot);
+    observer.observe(device);
+    window.addEventListener('resize', fit);
+    fit();
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', fit);
+    };
+  }, []);
+
+  return (
+    <div className="phone-preview" ref={deviceRef}>
+      <div className="phone-top" aria-hidden="true" />
+      <div className="phone-screen">
+        {html ? <iframe title={title} srcDoc={previewDocument(html)} sandbox="" /> : <div className="preview-empty">更新预览后在这里检查手机排版。</div>}
+      </div>
+    </div>
+  );
+}
+
+function PhonePreview({ html, title = '公众号手机预览' }: { html: string; title?: string }) {
+  return (
+    <div className="phone-preview-slot">
+      <PhoneDevice html={html} title={title} />
+    </div>
+  );
+}
+
+function ModalPhonePreview({ html }: { html: string }) {
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    const siblings: Array<{ element: HTMLElement; inert: boolean }> = [];
+    const backdrop = containerRef.current?.closest<HTMLElement>('.modal-backdrop');
+    for (let ancestor = backdrop; ancestor?.parentElement; ancestor = ancestor.parentElement) {
+      for (const sibling of ancestor.parentElement.children) {
+        if (!(sibling instanceof HTMLElement) || sibling === ancestor) continue;
+        siblings.push({ element: sibling, inert: sibling.inert });
+        sibling.inert = true;
+      }
+    }
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      for (const sibling of siblings) sibling.element.inert = sibling.inert;
+    };
+  }, []);
+
+  return (
+    <div className="phone-preview-modal" ref={containerRef}>
+      <PhonePreview html={html} title="公众号手机预览（放大）" />
+    </div>
+  );
+}
+
 function FormatStage({
   project, config, themeSummaries, notify, onSaved, onNext,
 }: {
@@ -858,9 +981,18 @@ function FormatStage({
   const [scheme, setScheme] = useState(initialFormat.scheme);
   const [html, setHtml] = useState(project.files.html || '');
   const [previewHtml, setPreviewHtml] = useState('');
+  const [previewZoom, setPreviewZoom] = useState(false);
+  const previewTrigger = useRef<HTMLButtonElement | null>(null);
   const [warnings, setWarnings] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const themeInfo = themeSummaries.find((item: any) => item.name === theme) || themeSummaries[0];
+
+  useEffect(() => {
+    if (!previewZoom && previewTrigger.current) {
+      previewTrigger.current.focus();
+      previewTrigger.current = null;
+    }
+  }, [previewZoom]);
 
   useEffect(() => {
     if (!coverImage) return;
@@ -951,32 +1083,48 @@ function FormatStage({
 
   return (
     <div>
-      <StageHeader title="排版" description="8 套主题 × 3 套配色、9 个组件与 ::: 语法；输出全部内联样式，可直接粘贴到微信编辑器。" />
-      <div className="form-grid form-grid-3">
-        <Field label="主题">
-          <select value={theme} onChange={event => { setTheme(event.target.value); setScheme(''); }}>
-            {themeSummaries.map((item: any) => <option key={item.name} value={item.name}>{item.name}</option>)}
-          </select>
-        </Field>
-        <Field label="配色">
-          <select value={scheme} onChange={event => setScheme(event.target.value)}>
-            {themeInfo?.schemes.map((item: any) => <option key={item.name} value={item.name}>{item.name}</option>)}
-          </select>
-        </Field>
-        <Field label="主题说明"><div className="static-field">{themeInfo?.description || '—'}</div></Field>
+      <div className="section-heading stage-heading format-heading">
+        <div><h2>排版</h2><p>选择主题与配色，编辑正文后检查手机预览。</p></div>
       </div>
       <div className="format-layout">
-        <div>
-          <Field label="article.md"><textarea className="article-input" value={markdown} onChange={event => setMarkdown(event.target.value)} rows={24} spellCheck={false} /></Field>
+        <div className="format-editor">
+          <div className="format-config">
+            <label className="field field-inline">
+              <span className="field-label">主题</span>
+              <select value={theme} onChange={event => { setTheme(event.target.value); setScheme(''); }}>
+                {themeSummaries.map((item: any) => <option key={item.name} value={item.name}>{item.name}</option>)}
+              </select>
+            </label>
+            <label className="field field-inline">
+              <span className="field-label">配色</span>
+              <select value={scheme} onChange={event => setScheme(event.target.value)}>
+                {themeInfo?.schemes.map((item: any) => <option key={item.name} value={item.name}>{item.name}</option>)}
+              </select>
+            </label>
+            <div className="field format-note">
+              <span className="field-label">主题说明</span>
+              <p className="static-field">{themeInfo?.description || '—'}</p>
+            </div>
+          </div>
+          <label className="field">
+            <span className="field-label source-heading"><span>正文编辑</span><code>article.md</code></span>
+            <textarea className="article-input" value={markdown} onChange={event => setMarkdown(event.target.value)} rows={24} spellCheck={false} />
+          </label>
           <div className="toolbar toolbar-end">
             <Button type="button" onClick={() => void render(true)} busy={busy}>更新预览</Button>
             <CopyButton text={html} label="复制 HTML" />
             <Button type="button" variant="primary" onClick={() => void save(false)} busy={busy}>保存排版</Button>
           </div>
         </div>
-        <div className="phone-preview">
-          <div className="phone-top" aria-hidden="true" />
-          {previewHtml ? <iframe title="公众号手机预览" srcDoc={previewDocument(previewHtml)} sandbox="" /> : <div className="preview-empty">更新预览后在这里检查手机排版。</div>}
+        <div className="format-preview">
+          <div className="preview-heading">
+            <span className="panel-label">手机预览</span>
+            <Button type="button" variant="ghost" onClick={event => {
+              previewTrigger.current = event.currentTarget;
+              setPreviewZoom(true);
+            }}>放大预览</Button>
+          </div>
+          <PhonePreview html={previewHtml} />
         </div>
       </div>
       {warnings.length ? <div className="notice warning">{warnings.map(item => <p key={item}>{item}</p>)}</div> : null}
@@ -984,6 +1132,11 @@ function FormatStage({
         <Button type="button" onClick={() => void save(false)} busy={busy}>仅保存</Button>
         <Button type="button" variant="primary" onClick={() => void save(true)} busy={busy}>保存排版，进入配图</Button>
       </div>
+      {previewZoom ? (
+        <Modal title="手机预览" onClose={() => setPreviewZoom(false)}>
+          <ModalPhonePreview html={previewHtml} />
+        </Modal>
+      ) : null}
     </div>
   );
 }
