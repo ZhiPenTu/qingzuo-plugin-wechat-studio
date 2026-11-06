@@ -1,4 +1,4 @@
-import { createPluginClient } from '../../vendor/plugin-sdk-1.11.0/index.mjs';
+import { createPluginClient } from '../../vendor/plugin-sdk-1.12.0/index.mjs';
 
 export type PluginClient = ReturnType<typeof createPluginClient>;
 export const api: PluginClient = createPluginClient();

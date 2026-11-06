@@ -18,7 +18,7 @@ assert(manifest.id === 'official.wechat-studio', '插件标识必须为 official
 assert(/^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)+$/.test(manifest.id), '插件标识格式无效。');
 assert(manifest.title === '公众号 AI 工作台', '插件名称无效。');
 assert(manifest.category === '内容创作', '插件分类无效。');
-assert(manifest.api === '^1.11.0', '插件 API 必须固定为 ^1.11.0。');
+assert(manifest.api === '^1.12.0', '插件 API 必须固定为 ^1.12.0。');
 assert(typeof manifest.ui === 'string' && !path.isAbsolute(manifest.ui) && !manifest.ui.includes('..'), '插件界面路径无效。');
 assert(!manifest.backend, '纯前端插件不能声明本机后端。');
 

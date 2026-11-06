@@ -27,8 +27,10 @@ import {
   stickerBatchMatches,
   stickerBatchRetryable,
   stickerDocumentMarkdown,
+  stickerDraftMatches,
   stickerGenerationPrompt,
   stickerItemDuplicateIssues,
+  stickerMessageTitle,
   stickerOutlineMarkdown,
   stickerPlanBriefIssues,
   stickerPlanIssues,
@@ -125,13 +127,15 @@ export function StickerPage({
   const draftBlockedReason = draftState === 'failed'
     ? '上次发布未成功。请先核对公众号后台，再重置本地状态并重新创建草稿。'
     : '上次草稿或发布操作的结果未知。请先在公众号后台核对；确认后才能继续或明确重置。';
-  const draftMatches = Boolean(
-    fingerprintReady
-    && mediaId
-    && receipt.accountId === accountId
-    && receiptSourceFingerprint
-    && receiptSourceFingerprint === fingerprint,
-  );
+  const draftMatches = stickerDraftMatches({
+    fingerprintReady,
+    mediaId,
+    delivery: receipt.delivery,
+    accountId,
+    receiptAccountId: receipt.accountId,
+    receiptFingerprint: receiptSourceFingerprint,
+    fingerprint,
+  });
   const currentImageCount = items.filter(item => {
     const file = filesByItem[item.id];
     const state = String(itemStates[item.id]?.state || '');
@@ -325,7 +329,6 @@ export function StickerPage({
       summary: planSummary,
       medium,
       style,
-      author: config.default_author,
       needOpenComment: config.need_open_comment,
       onlyFansCanComment: config.only_fans_can_comment,
       items,
@@ -732,7 +735,7 @@ export function StickerPage({
         } else if (missing || result.failures.length) {
           notify('贴图方案已保存，仍有 ' + Math.max(0, missing) + ' 张缺失。' + (result.failures[0]?.error ? '首个错误：' + result.failures[0].error : ''), 'warning');
         } else {
-          notify('整组贴图已通过 MCP 生成并保存，可继续创建公众号草稿。', 'success');
+          notify('整组贴图已通过 MCP 生成并保存，可继续创建公众号图片消息草稿。', 'success');
         }
       } catch (error) {
         setMcpWaiting(false);
@@ -865,7 +868,7 @@ export function StickerPage({
           + (degraded ? '，其中 ' + degraded + ' 张未产出本次新文件或被标记失败' : '')
           + (unknown ? '，其中包含结果未知项' : '') + '。请明确选择重试或重新生成。', 'warning');
       } else {
-        notify('整组贴图已生成并保存，可继续创建公众号草稿。微信原生图片消息仍需在公众号后台手动发送。', 'success');
+        notify('整组贴图已生成并保存，可继续创建公众号图片消息草稿。', 'success');
       }
     } catch (error) {
       notify(errorText(error), 'danger');
@@ -1088,7 +1091,7 @@ export function StickerPage({
         stickersDirectory: postDirectory,
         projectRelativeFiles: savedRelativeFiles,
         projectFingerprint: currentFingerprint,
-        projectTitle: String(saved.projectTitle || title.trim() || topic.trim() || '贴图草稿'),
+        projectTitle: stickerMessageTitle(saved.projectTitle || title || topic || '贴图草稿'),
         projectDigest: String(saved.projectDigest || digest || '').trim().slice(0, 120),
         source: 'sticker',
         sourceFingerprint: currentFingerprint,
@@ -1104,7 +1107,7 @@ export function StickerPage({
       return {
         directory: savedDirectory,
         relativeFiles: savedRelativeFiles,
-        title: String(saved.projectTitle || title.trim() || topic.trim() || '贴图草稿'),
+        title: stickerMessageTitle(saved.projectTitle || title || topic || '贴图草稿'),
         digest: String(saved.projectDigest || digest || '').trim().slice(0, 120),
         cover: String(savedRelativeFiles[items[0]?.id] || ''),
         articleFingerprint: await stickerProjectArticleFingerprint(api, savedDirectory),
@@ -1163,7 +1166,7 @@ export function StickerPage({
       return;
     }
     if (mediaId && draftMatches) {
-      notify('当前贴图方案已有公众号草稿，无需重复创建。', 'warning');
+      notify('当前贴图方案已有公众号图片消息草稿，无需重复创建。', 'warning');
       return;
     }
     if (!publishReady) {
@@ -1171,7 +1174,7 @@ export function StickerPage({
       return;
     }
     if (!draftEnabled) {
-      notify('当前配置为只保存到本地，不会创建公众号草稿。', 'warning');
+      notify('当前配置为只保存到本地，不会创建公众号图片消息草稿。', 'warning');
       return;
     }
     if (draftBlocked) {
@@ -1204,6 +1207,7 @@ export function StickerPage({
         mediaId: null,
         publishId: null,
         state: 'creating-draft',
+        delivery: 'image',
         articleFingerprint: project.articleFingerprint,
         sourceFingerprint: project.fingerprint,
         source: 'sticker',
@@ -1223,21 +1227,22 @@ export function StickerPage({
         mediaId: result.mediaId,
         publishId: null,
         state: 'draft',
+        delivery: 'image',
         title: project.title,
         articleFingerprint: project.articleFingerprint,
         sourceFingerprint: project.fingerprint,
         source: 'sticker',
         error: null,
       });
-      notify('整组贴图已保存为文章项目并创建公众号草稿。请先在后台核对，再决定是否发布。', 'success');
+      notify('整组贴图已创建公众号图片消息草稿。请先在后台核对，再决定是否发布。', 'success');
     } catch (error) {
       const uncertain = hostCalled;
       const nextState = uncertain ? 'draft-unknown' : 'draft-failed';
       if (dir) await persistDraftReceipt(dir, projectDirectory, { state: nextState, error: errorText(error) }).catch(() => {});
       notify(
         uncertain
-          ? '草稿创建结果不确定：' + errorText(error) + '。请先在公众号后台核对，避免重复创建。'
-          : '创建草稿前检查失败：' + errorText(error) + '。已保留贴图方案和文章项目，可修正后重试。',
+          ? '图片消息草稿创建结果不确定：' + errorText(error) + '。请先在公众号后台核对，避免重复创建。'
+          : '创建图片消息草稿前检查失败：' + errorText(error) + '。已保留贴图方案和文章项目，可修正后重试。',
         'danger',
       );
     } finally {
@@ -1251,7 +1256,7 @@ export function StickerPage({
       return;
     }
     if (!mediaId) {
-      notify('请先创建并核对公众号草稿。', 'warning');
+      notify('请先创建并核对公众号图片消息草稿。', 'warning');
       return;
     }
     if (planIssues.length) {
@@ -1287,6 +1292,7 @@ export function StickerPage({
         accountId,
         mediaId,
         state: 'submitting',
+        delivery: 'image',
         publishId: null,
         error: null,
       });
@@ -1297,6 +1303,7 @@ export function StickerPage({
         mediaId,
         publishId: result.publishId,
         state: 'submitted',
+        delivery: 'image',
       });
       notify('发布已提交，正在查询状态。', 'success');
       await queryStatus(result.publishId);
@@ -1337,7 +1344,7 @@ export function StickerPage({
         articleUrl: value.articleUrl,
         error: value.error || null,
       });
-      notify(value.status === 'success' ? '贴图图文已发布。' : value.status === 'pending' ? '贴图图文仍在发布队列中。' : '发布未成功，请查看状态。', value.status === 'failed' ? 'danger' : 'info');
+      notify(value.status === 'success' ? '贴图图片消息已发布。' : value.status === 'pending' ? '贴图图片消息仍在发布队列中。' : '发布未成功，请查看状态。', value.status === 'failed' ? 'danger' : 'info');
     } catch (error) {
       notify(errorText(error), 'danger');
     } finally {
@@ -1403,7 +1410,7 @@ export function StickerPage({
       <header className="page-header">
         <div>
           <h1>贴图工作流</h1>
-          <p>先规划整组方案与逐图观点，再按方案小结生成 1–9 张统一风格的贴图；完成后可直接创建公众号草稿并发布常规图文。</p>
+          <p>先规划整组方案与逐图观点，再按方案小结生成 1–9 张统一风格的贴图；完成后可创建公众号图片消息草稿并发布。</p>
         </div>
         <Badge tone="success">草稿 / 发布已接入</Badge>
       </header>
@@ -1485,7 +1492,7 @@ export function StickerPage({
                 <div className="static-field">{style} · {medium}</div>
               </Field>
             </div>
-            <Field label="整组主旨" hint="这张方案总起句会作为生图上下文，也可作为草稿摘要。">
+            <Field label="整组主旨" hint="这张方案总起句会作为生图上下文，也可作为图片消息的说明文字。">
               <textarea className="lines-input" value={planSummary} onChange={event => { clearBatchBinding(); markImagesStale(); setPlanSummary(event.target.value); }} rows={2} maxLength={200} disabled={operationBusy} />
             </Field>
           </div>
@@ -1584,10 +1591,10 @@ export function StickerPage({
           <div className="section-heading">
             <div>
               <h2>草稿与发布</h2>
-              <p>把整组贴图整理为常规图文，创建公众号草稿后可核对并提交发布。微信原生“图片消息”仍需在公众号后台手动发送。</p>
+              <p>整组贴图按公众号图片消息提交，首张作为封面。创建草稿后可核对并提交发布。</p>
             </div>
             <Badge tone={publishReady ? 'success' : planIssues.length || generatedCount ? 'warning' : 'neutral'}>
-              {publishReady ? '可创建草稿' : planIssues.length ? '方案待修正' : generatedCount + '/' + items.length + ' 张已完成'}
+              {publishReady ? '可创建图片消息' : planIssues.length ? '方案待修正' : generatedCount + '/' + items.length + ' 张已完成'}
             </Badge>
           </div>
           <div className="form-grid">
@@ -1601,10 +1608,10 @@ export function StickerPage({
                 {publishMethod === 'published' ? '创建草稿后可提交直接发布' : publishMethod === 'none' ? '仅保存到本地' : '仅创建草稿'}
               </div>
             </Field>
-            <Field label="草稿标题">
-              <input value={title} onChange={event => setTitle(event.target.value)} placeholder="公众号草稿标题" maxLength={64} disabled={operationBusy} />
+            <Field label="图片消息标题" hint="最多 32 字。">
+              <input value={title} onChange={event => setTitle(event.target.value)} placeholder="公众号图片消息标题" maxLength={32} disabled={operationBusy} />
             </Field>
-            <Field label="摘要" hint="最多 120 字，默认使用整组方案主旨。">
+            <Field label="说明文字" hint="最多 120 字，作为图片消息的文字说明。">
               <textarea className="lines-input" value={digest} onChange={event => setDigest(event.target.value)} rows={3} maxLength={120} disabled={operationBusy} />
             </Field>
           </div>
@@ -1614,7 +1621,7 @@ export function StickerPage({
           {mediaId ? <div className="receipt"><span>草稿 mediaId</span><code>{mediaId}</code></div> : null}
           {publishId ? <div className="receipt"><span>发布标识</span><code>{publishId}</code></div> : null}
           {receipt.error ? <div className="notice warning">{String(receipt.error)}</div> : null}
-          {mediaId && fingerprintReady && !draftMatches && receipt.articleFingerprint ? <div className="notice warning">草稿创建后贴图、标题、摘要或配文已变化，请重新创建草稿。</div> : null}
+          {mediaId && fingerprintReady && !draftMatches && receipt.articleFingerprint ? <div className="notice warning">图片消息草稿创建后贴图、标题、说明文字或配文已变化，请重新创建草稿。</div> : null}
           {draftBlocked ? (
             <div className="notice warning">
               {draftBlockedReason}插件不会自动重发。
@@ -1635,7 +1642,7 @@ export function StickerPage({
               保存到文章项目
             </Button>
             <Button type="button" variant="primary" onClick={() => void createDraft()} busy={publishBusy} disabled={!publishReady || !accountId || draftBlocked || !draftEnabled || !fingerprintReady || operationBusy || Boolean(mediaId && draftMatches)}>
-              {!fingerprintReady ? '正在核对方案' : mediaId && draftMatches ? '当前方案已有草稿' : '创建公众号草稿'}
+              {!fingerprintReady ? '正在核对方案' : mediaId && draftMatches ? '当前方案已有图片消息草稿' : '创建图片消息草稿'}
             </Button>
             <Button type="button" onClick={() => void publish()} busy={publishBusy} disabled={!mediaId || Boolean(publishId) || draftBlocked || !draftMatches || publishMethod !== 'published' || operationBusy}>
               提交直接发布

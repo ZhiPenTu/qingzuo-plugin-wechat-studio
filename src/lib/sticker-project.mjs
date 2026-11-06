@@ -75,7 +75,7 @@ export async function materializeStickerProject(api, {
   if (missing.length) {
     throw new Error('还有 ' + missing.length + ' 张贴图未生成，请补齐后再保存为文章项目。');
   }
-  const projectTitle = [...String(title || '').trim()].slice(0, 64).join('') || '贴图草稿';
+  const projectTitle = [...String(title || '').trim()].slice(0, 32).join('') || '贴图草稿';
   const projectDigest = String(digest || '').trim().slice(0, 120)
     || ('本组贴图围绕「' + projectTitle + '」展开，共 ' + sourceItems.length + ' 张。');
   const relativeFiles = stickerProjectRelativeFiles(sourceItems);
@@ -216,46 +216,32 @@ export function stickerWechatPayload({
 }) {
   const root = String(directory || '').trim();
   if (!/^drafts(?:\/[^\\:*?"<>|]+)+$/.test(root) || root.split('/').includes('..')) {
-    throw new Error('贴图公众号草稿必须物化到 drafts/ 文章目录。');
+    throw new Error('贴图图片消息必须物化到 drafts/ 文章目录。');
   }
   const sourceItems = Array.isArray(items) ? items : [];
-  if (!sourceItems.length) throw new Error('请先生成至少一张贴图，再创建公众号草稿。');
+  if (!sourceItems.length) throw new Error('请先生成至少一张贴图，再创建公众号图片消息草稿。');
   const missing = sourceItems.filter(item => !String(relativeFiles?.[item.id] || '').trim());
   if (missing.length) throw new Error('还有 ' + missing.length + ' 张贴图没有物化到文章项目。');
-  const cover = String(relativeFiles?.[sourceItems[0].id] || '');
-  if (!cover) throw new Error('请先生成封面贴图，再创建公众号草稿。');
   const articleTitle = String(title || '').trim();
-  if (!articleTitle) throw new Error('公众号草稿标题不能为空。');
-  if ([...articleTitle].length > 64) throw new Error('公众号草稿标题不能超过 64 个字符。');
-  const author = String(config.default_author || '').trim();
-  if ([...author].length > 32) throw new Error('公众号作者不能超过 32 个字符。');
+  if (!articleTitle) throw new Error('图片消息标题不能为空。');
+  if ([...articleTitle].length > 32) throw new Error('公众号图片消息标题不能超过 32 个字符。');
   if (!String(accountId || '').trim()) throw new Error('请先选择公众号账号。');
-  const markdown = stickerProjectMarkdown({
-    title: articleTitle,
-    digest,
-    items: sourceItems,
-    filesByItem: relativeFiles,
+  const images = sourceItems.map((item, index) => {
+    const asset = stickerAssetPath(root, relativeFiles[item.id]);
+    return {
+      placeholder: 'image-' + (index + 1),
+      path: asset.path,
+    };
   });
-  const fullHtml = renderMarkdownDocument(markdown);
-  const assets = [];
-  let counter = 0;
-  const html = fullHtml.replace(/<img([^>]*?)\ssrc=["']([^"']+)["']([^>]*)>/gi, (_match, before, src, after) => {
-    const asset = stickerAssetPath(root, src);
-    const placeholder = 'asset-' + (++counter);
-    assets.push({ placeholder, path: asset.path });
-    return '<img' + before + ' src="qingzuo-asset:' + placeholder + '"' + after + '>';
-  });
-  if (!assets.length) throw new Error('贴图正文没有可发布的图片。');
+  if (!images.length) throw new Error('贴图图片消息没有可发布的图片。');
   return {
     accountId,
     article: {
+      type: 'image',
       articleDir: root,
       title: articleTitle,
-      author,
       digest: String(digest || '').trim().slice(0, 120),
-      html,
-      cover: { placeholder: 'cover', path: root + '/' + cover },
-      assets,
+      images,
       needOpenComment: enabled(config.need_open_comment, true),
       onlyFansCanComment: enabled(config.only_fans_can_comment, false),
     },
