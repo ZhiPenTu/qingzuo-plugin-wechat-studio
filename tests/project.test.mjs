@@ -5,6 +5,7 @@ import {
   createProject,
   dateStamp,
   deleteProjectDirectory,
+  invalidateDerivedProjectFiles,
   listProjects,
   loadProject,
   nextStage,
@@ -108,6 +109,19 @@ test('stage progress marks current and completed', () => {
   assert.equal(progress.find(item => item.id === 'writing').current, true);
   assert.equal(progress.find(item => item.id === 'topic').completed, true);
   assert.equal(progress.find(item => item.id === 'review').completed, false);
+});
+
+test('draft replacement invalidates every downstream artifact', async () => {
+  const { api, files } = memoryApi();
+  for (const file of ['review.md', 'article.md', 'article.html', 'img-plan.json', 'final-review.md', 'publish.json']) {
+    files.set('drafts/demo/' + file, 'old');
+  }
+  files.set('drafts/demo/draft.md', '# 新稿\n');
+  await invalidateDerivedProjectFiles(api, 'drafts/demo');
+  assert.equal(files.has('drafts/demo/draft.md'), true);
+  for (const file of ['review.md', 'article.md', 'article.html', 'img-plan.json', 'final-review.md', 'publish.json']) {
+    assert.equal(files.has('drafts/demo/' + file), false);
+  }
 });
 
 test('project creation avoids overwrite and starts rewrite work at writing', async () => {

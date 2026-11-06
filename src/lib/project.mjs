@@ -213,6 +213,25 @@ export async function deleteProjectDirectory(api, directory) {
   return { cleaned: true, trashPath: tombstone };
 }
 
+export async function invalidateDerivedProjectFiles(api, directory, options = {}) {
+  const files = [
+    ...(options.includeReview === false ? [] : ['review.md']),
+    'article.md',
+    'article.html',
+    'img-plan.json',
+    'final-review.md',
+    'publish.json',
+  ];
+  for (const file of files) {
+    const path = directory + '/' + file;
+    try {
+      await api.workspace.remove({ path, recursive: false });
+    } catch (error) {
+      if (!isMissingError(error)) throw error;
+    }
+  }
+}
+
 export async function saveStage(api, directory, stage, content, options = {}) {
   const stageInfo = STAGES.find(item => item.id === stage);
   if (!stageInfo) throw new Error('未知阶段。');

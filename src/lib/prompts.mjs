@@ -138,6 +138,43 @@ export function buildReviewPrompt(config = {}, article = {}, markdown = '', opti
   };
 }
 
+export function buildBlockFixPrompt(config = {}, article = {}, markdown = '', options = {}) {
+  const merged = mergedConfig(config, article);
+  const blockers = Array.isArray(options.issues)
+    ? options.issues
+      .filter(item => item?.level === 'block')
+      .map(item => [
+        '- ' + String(item.category || '阻断项') + '：' + String(item.message || ''),
+        item.excerpt ? '  原句：' + String(item.excerpt).replace(/\s+/g, ' ') : '',
+      ].filter(Boolean).join('\n'))
+      .filter(Boolean)
+    : [];
+  const forbidden = [...(merged.forbidden_words || []), ...(merged.custom_sensitive_words || [])];
+  const titleForbidden = [...new Set([...(merged.forbidden_title_phrases || []), ...forbidden])];
+  const titleLimit = Math.max(1, Number(merged.title_max_length) || 64);
+  return {
+    system: [
+      '你是公众号定稿修复编辑。只修复下面列出的阻断级问题，不处理警告和建议。',
+      '必须在原稿上做最小改动：不改写未命中阻断的内容，不新增事实、数字、案例、引文、观点或图片来源。',
+      '保留原有配图占位符、图注、链接锚文本和 Markdown 结构；外链图片必须改为保留原 alt 的 placeholder，不得编造本地文件名。',
+      '修复后必须满足：一个「# 」标题、第一个二级标题前有一处「> 」导语、至少两个「## 」小节、加粗落点和本地最低字数门槛。',
+      '若阻断项是字数或结构不足，只能用原稿已有事实和当前发布信息重组、补充分节与加粗；无法在不虚构的前提下达标时保持安全内容并停止，交回用户处理。',
+      '标题不能包含禁用表达；正文不能包含禁用或敏感词；不能保留外链图片。',
+      '标题不超过 ' + titleLimit + ' 字。',
+      '无法在不编造内容的前提下消除某个阻断项时，保留安全内容并停下，不要用注释、代码块或说明文字伪装成已修复。',
+      '只输出完整修订后的 Markdown 正文，不要代码围栏、前言、修改清单或审稿报告。',
+      '目标字数参考：' + merged.target_word_count + '（只为列出的阻断项改写，不得为凑字数新增事实或观点）',
+      forbidden.length ? '禁用或敏感词：' + forbidden.join('、') : '',
+      titleForbidden.length ? '标题禁用表达：' + titleForbidden.join('、') : '',
+    ].filter(Boolean).join('\n'),
+    user: [
+      '当前发布标题：' + String(article.title || '未填写'),
+      blockers.length ? '需要修复的阻断项：\n' + blockers.join('\n') : '当前没有阻断项。',
+      '请修复以下原稿并输出完整正文：\n\n' + String(markdown || ''),
+    ].join('\n\n'),
+  };
+}
+
 export function buildImagePrompt(plan, item = {}) {
   return [
     plan?.title ? '文章标题：' + plan.title : '',

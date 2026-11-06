@@ -1,3 +1,5 @@
+import { lineCodeFlags } from './markdown-syntax.mjs';
+
 const CJK = /[\u3400-\u9fff\u3000-\u303f\uff00-\uffef]/g;
 const CITATION = /（资料路径[:：]\s*`[^`]+?`）/g;
 const QUOTE_CARD = /^(.*?)\s*(?:——|—|--)\s*([^\s—][^—]{0,24})$/;
@@ -33,24 +35,21 @@ export function extractBoldOutline(text) {
 
 export function splitMarkdownBlocks(text) {
   const lines = String(text || '').split('\n');
+  const codeFlags = lineCodeFlags(lines);
   const blocks = [];
   let current = [];
-  let fenced = false;
   const flush = () => {
     if (!current.length) return;
     blocks.push({ kind: 'paragraph', text: current.join('\n').trim() });
     current = [];
   };
-  for (const line of lines) {
-    if (/^\s*```/.test(line)) {
-      if (!fenced) flush();
-      fenced = !fenced;
-      current.push(line);
-      if (!fenced) flush();
-      continue;
-    }
-    if (fenced) {
-      current.push(line);
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (codeFlags[index]) {
+      flush();
+      const start = index;
+      while (index + 1 < lines.length && codeFlags[index + 1]) index += 1;
+      blocks.push({ kind: 'code', text: lines.slice(start, index + 1).join('\n').trim() });
       continue;
     }
     if (!line.trim()) {
@@ -85,7 +84,6 @@ export function splitMarkdownBlocks(text) {
 
 export function checkDraft(text, config = {}) {
   const source = String(text || '');
-  const lines = source.split('\n');
   const blocks = splitMarkdownBlocks(source);
   const headings = blocks.filter(block => block.kind === 'heading');
   const h2 = headings.filter(block => block.level === 2);
@@ -96,9 +94,8 @@ export function checkDraft(text, config = {}) {
     .join('\n');
   const words = cjkCount(body);
   const bolds = extractBoldOutline(body);
-  const firstH2 = lines.findIndex(line => /^##\s+/.test(line));
-  const leadEnd = firstH2 < 0 ? lines.length : firstH2;
-  const lead = lines.slice(0, leadEnd).some(line => /^>\s*\S/.test(line));
+  const firstH2 = blocks.findIndex(block => block.kind === 'heading' && block.level === 2);
+  const lead = blocks.slice(0, firstH2 < 0 ? blocks.length : firstH2).some(block => block.kind === 'quote' && block.text);
   const quoteCards = blocks
     .filter(block => block.kind === 'quote')
     .map(block => block.text.match(QUOTE_CARD))
@@ -106,7 +103,7 @@ export function checkDraft(text, config = {}) {
   const issues = [];
   const warnings = [];
 
-  if (!/^#\s+\S/m.test(source)) issues.push('缺少以「# 」开头的文章标题。');
+  if (!headings.some(block => block.level === 1)) issues.push('缺少以「# 」开头的文章标题。');
   if (!lead) issues.push('第一个二级标题之前缺少「> 」摘要导语。');
   if (h2.length < 2) issues.push('至少需要两个「## 」正文小节。');
   if (words < Math.round(minWords * 0.75)) issues.push('正文仅约 ' + words + ' 字，低于目标 ' + minWords + ' 字的四分之三。');

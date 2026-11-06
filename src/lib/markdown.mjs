@@ -1,4 +1,7 @@
 import { substituteTheme } from './styles.mjs';
+import { fenceInfo, lineCodeFlags } from './markdown-syntax.mjs';
+
+export { fenceInfo, lineCodeFlags } from './markdown-syntax.mjs';
 
 export const INFO_SLOT_FORMS = new Set(['信息图', '实证', '流程图', '对比']);
 
@@ -6,27 +9,6 @@ export function isCoverImageAlt(alt) {
   const value = String(alt || '');
   const type = (value.includes('：') ? value.split('：', 1)[0].trim() : value.split(':', 1)[0].trim()).toLowerCase();
   return type === '封面' || type === 'cover';
-}
-
-export function fenceInfo(line) {
-  const match = String(line).match(/^\s*(`{3,}|~{3,})/);
-  return match ? { char: match[1][0], length: match[1].length } : null;
-}
-
-export function lineCodeFlags(lines) {
-  const flags = [];
-  let fence = null;
-  for (const line of lines) {
-    const info = fenceInfo(line);
-    if (!fence) {
-      if (info) fence = info;
-      flags.push(Boolean(info));
-      continue;
-    }
-    flags.push(true);
-    if (info && info.char === fence.char && info.length >= fence.length) fence = null;
-  }
-  return flags;
 }
 
 function escapeHtml(value) {

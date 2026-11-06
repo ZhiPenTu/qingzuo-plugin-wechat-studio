@@ -3,7 +3,7 @@ import { api, errorText, isMissingError, readOptional, shortId } from './client'
 import { Badge, Button, CopyButton, Empty, Field, Modal, Tabs } from './common';
 import { callWorker } from './worker-client';
 import { McpPanel } from './McpPanel';
-import { buildReviewPrompt, buildTopicPrompt, buildWritingPrompt } from '../lib/prompts.mjs';
+import { buildBlockFixPrompt, buildReviewPrompt, buildTopicPrompt, buildWritingPrompt } from '../lib/prompts.mjs';
 import { checkDraft, extractBoldOutline, stripCitations } from '../lib/writing.mjs';
 import {
   aiReviewSupplement,
@@ -11,6 +11,7 @@ import {
   mergeReviewMarkdown,
   reviewArticle,
 } from '../lib/review.mjs';
+import { acceptsBlockFixFinish, applyBlockFix } from '../lib/review-fix.mjs';
 import {
   articlePublicationFingerprint,
   buildPublicationGate,
@@ -38,6 +39,7 @@ import { resolveFormatOptions } from '../lib/config.mjs';
 import {
   appendLog,
   deleteProjectDirectory,
+  invalidateDerivedProjectFiles,
   loadProject,
   nextStage,
   previousStage,
@@ -95,6 +97,22 @@ const PROJECT_FILES = [
   'article.yaml', 'topic-card.md', 'research.md', 'draft.md',
   'review.md', 'article.md', 'article.html', 'stage-log.md',
 ];
+const DOWNSTREAM_STAGES = new Set(['format', 'images', 'final', 'publish']);
+
+function reviewSourceFor(project: ArticleProject, phase: 'review' | 'downstream' = 'review') {
+  const hasDraft = Array.isArray(project.entries)
+    ? project.entries.some(entry => entry.path === project.directory + '/draft.md' && entry.kind === 'file')
+    : Boolean(project.files.writing);
+  if (phase === 'downstream') return project.files.format || (hasDraft ? project.files.writing || '' : '');
+  return hasDraft ? project.files.writing || '' : project.files.format || '';
+}
+
+function safeInitialStage(project: ArticleProject, config: Record<string, any>) {
+  const stage = project.stage.id;
+  if (!DOWNSTREAM_STAGES.has(stage)) return stage;
+  const review = reviewArticle(reviewSourceFor(project, 'downstream'), config, { title: project.article.title });
+  return review.ok ? stage : 'review';
+}
 
 type MetaField = 'title' | 'author' | 'digest';
 
@@ -235,13 +253,14 @@ function ProjectWorkspace({
   onChanged: () => Promise<void>;
   onGoConfig: () => void;
 }) {
-  const [active, setActive] = useState(project.stage.id);
+  const [active, setActive] = useState(() => safeInitialStage(project, config));
   const [deleting, setDeleting] = useState(false);
   const [metaPanelOpen, setMetaPanelOpen] = useState(false);
   const [pendingMetaFocus, setPendingMetaFocus] = useState<MetaField | null>(null);
   useEffect(() => {
-    setActive(project.stage.id);
-  }, [project.directory, project.stage.id]);
+    setActive(safeInitialStage(project, config));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project.directory, project.stage.id, project.files.writing, project.files.format, project.article.title, project.entries]);
   useEffect(() => {
     if (!metaPanelOpen || !pendingMetaFocus) return;
     const frame = window.requestAnimationFrame(() => {
@@ -258,19 +277,28 @@ function ProjectWorkspace({
   }, [metaPanelOpen, pendingMetaFocus]);
 
   const progress = stageProgress(project.pipeline);
-  const wordCount = checkDraft(project.files.writing || project.files.format || '', config).metrics.words;
+  const wordCount = checkDraft(reviewSourceFor(project), config).metrics.words;
   const fileFacts = useMemo(() => PROJECT_FILES.map(file => ({
     file,
     saved: project.entries.some(entry => entry.path === project.directory + '/' + file),
   })), [project.directory, project.entries]);
   const savedFileCount = fileFacts.filter(item => item.saved).length;
 
-  async function advance(stage: string, options: { next?: boolean } = {}) {
+  async function advance(stage: string, options: { next?: boolean; complete?: boolean } = {}) {
     try {
+      const target = options.next === false ? stage : nextStage(stage);
+      if (DOWNSTREAM_STAGES.has(target)) {
+        const fresh = await loadProject(api, project.directory) as unknown as ArticleProject;
+        const review = reviewArticle(reviewSourceFor(fresh, 'downstream'), config, { title: fresh.article.title });
+        if (!review.ok) {
+          notify('仍有阻断级问题，先在内容审处理后再继续。', 'warning');
+          setActive('review');
+          return;
+        }
+      }
       await saveStage(api, project.directory, stage, undefined, options);
       await onChanged();
       await onReload();
-      const target = options.next === false ? stage : nextStage(stage);
       setActive(target);
       notify('已保存「' + STAGE_LABELS[stage] + '」。', 'success');
     } catch (error) {
@@ -306,6 +334,23 @@ function ProjectWorkspace({
     setPendingMetaFocus(field);
   }
 
+  async function goStage(stage: string) {
+    if (DOWNSTREAM_STAGES.has(stage)) {
+      try {
+        const fresh = await loadProject(api, project.directory) as unknown as ArticleProject;
+        const review = reviewArticle(reviewSourceFor(fresh, 'downstream'), config, { title: fresh.article.title });
+        if (!review.ok) {
+          notify('仍有阻断级问题，先在内容审处理后再继续。', 'warning');
+          return;
+        }
+      } catch (error) {
+        notify('无法读取最新内容审结果：' + errorText(error), 'danger');
+        return;
+      }
+    }
+    setActive(stage);
+  }
+
   return (
     <div className="page project-page">
       <header className="page-header project-header">
@@ -327,7 +372,7 @@ function ProjectWorkspace({
             type="button"
             key={stage.id}
             className={['stage-step', stage.current ? 'current' : '', stage.completed ? 'completed' : '', active === stage.id ? 'viewing' : ''].filter(Boolean).join(' ')}
-            onClick={() => setActive(stage.id)}
+            onClick={() => void goStage(stage.id)}
             aria-current={active === stage.id ? 'step' : undefined}
           >
             <span>{stage.completed ? '✓' : index + 1}</span>
@@ -353,7 +398,7 @@ function ProjectWorkspace({
             <span className="project-context-files">{savedFileCount}/{PROJECT_FILES.length} 个文件已保存</span>
             <span className="project-context-action">{metaPanelOpen ? '收起' : '展开'}</span>
           </button>
-          <NavActions active={active} onBack={() => setActive(previousStage(active))} onNext={() => setActive(nextStage(active))} />
+          <NavActions active={active} onBack={() => void goStage(previousStage(active))} onNext={() => void goStage(nextStage(active))} />
         </div>
           <div className="project-context-panel" id="project-context-panel" hidden={!metaPanelOpen}>
             <section>
@@ -389,7 +434,7 @@ function ProjectWorkspace({
           ) : active === 'writing' ? (
             <WritingStage project={project} config={config} modelId={preferences.textModelId} notify={notify} onSaved={() => void advance('writing', { next: false })} onNext={() => void advance('writing')} />
           ) : active === 'review' ? (
-            <ReviewStage project={project} config={config} modelId={preferences.textModelId} notify={notify} onSaved={() => void advance('review', { next: false })} onNext={() => void advance('review')} />
+            <ReviewStage project={project} config={config} modelId={preferences.textModelId} notify={notify} onSaved={() => void advance('review', { next: false, complete: false })} onNext={() => void advance('review')} onReload={onReload} />
           ) : active === 'format' ? (
             <FormatStage project={project} config={config} themeSummaries={themeSummaries} notify={notify} onSaved={() => void advance('format', { next: false })} onNext={() => void advance('format')} />
           ) : active === 'images' ? (
@@ -402,7 +447,7 @@ function ProjectWorkspace({
               notify={notify}
               onSaved={() => void advance('final', { next: false })}
               onNext={() => void advance('final')}
-              onGoStage={setActive}
+              onGoStage={goStage}
               onEditMeta={focusMeta}
               onGoConfig={onGoConfig}
             />
@@ -489,15 +534,16 @@ function isTimeoutError(error: unknown) {
     || ['TimeoutError', 'AbortError'].includes(String((error as any)?.name || ''));
 }
 
-async function completeTextResult(system: string, user: string, modelId: string, maxTokens: number) {
+async function completeTextResult(system: string, user: string, modelId: string, maxTokens: number, temperature = 0.7) {
   const result = await api.ai.complete({
     model: modelId || undefined,
     messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
-    temperature: 0.7,
+    temperature,
     maxTokens,
   });
   return {
     content: String(result.content || ''),
+    finishReason: String(result.finishReason || '').toLowerCase(),
     truncated: result.finishReason === 'length' || result.finishReason === 'max_tokens',
   };
 }
@@ -684,15 +730,15 @@ function WritingStage({
   project: ArticleProject; config: Record<string, any>; modelId: string; notify: Notify;
   onSaved: () => void; onNext: () => void;
 }) {
-  const [value, setValue] = useState(project.files.writing || project.files.format || '');
+  const [value, setValue] = useState(reviewSourceFor(project));
   const [busy, setBusy] = useState(false);
   const [spec, setSpec] = useState('');
   const [check, setCheck] = useState<any>(null);
   useEffect(() => {
-    setValue(project.files.writing || project.files.format || '');
+    setValue(reviewSourceFor(project));
     void readOptional('.aws-article/writing-spec.md').then(setSpec);
-    void callWorker('check', { markdown: project.files.writing || project.files.format || '', config }).then(setCheck).catch(() => {});
-  }, [project.directory, project.files.writing, project.files.format, config]);
+    void callWorker('check', { markdown: reviewSourceFor(project), config }).then(setCheck).catch(() => {});
+  }, [project.directory, project.files.writing, project.files.format, project.entries, config]);
 
   async function generate() {
     setBusy(true);
@@ -732,6 +778,7 @@ function WritingStage({
       const result = await callWorker<any>('check', { markdown: value, config });
       setCheck(result);
       await api.workspace.writeText({ path: project.directory + '/draft.md', text: value, overwrite: true });
+      await invalidateDerivedProjectFiles(api, project.directory);
       if (next) onNext(); else onSaved();
     } catch (error) {
       notify(errorText(error), 'danger');
@@ -773,20 +820,21 @@ function WritingCheck({ check }: { check: any }) {
 }
 
 function ReviewStage({
-  project, config, modelId, notify, onSaved, onNext,
+  project, config, modelId, notify, onSaved, onNext, onReload,
 }: {
   project: ArticleProject; config: Record<string, any>; modelId: string; notify: Notify;
-  onSaved: () => void; onNext: () => void;
+  onSaved: () => void; onNext: () => void; onReload: () => Promise<void>;
 }) {
   const [result, setResult] = useState<any>(null);
   const [aiValue, setAiValue] = useState(project.files.review || '');
   const [busy, setBusy] = useState(false);
+  const [fixMessage, setFixMessage] = useState<{ text: string; tone: 'info' | 'warning' | 'danger' } | null>(null);
 
   const reviewDirectory = useRef(project.directory);
-  const reviewSource = useRef(project.files.writing || project.files.format || '');
+  const reviewSource = useRef(reviewSourceFor(project));
 
   function runLocal() {
-    const source = project.files.writing || project.files.format || '';
+    const source = reviewSourceFor(project);
     const changed = reviewDirectory.current !== project.directory || reviewSource.current !== source;
     reviewDirectory.current = project.directory;
     reviewSource.current = source;
@@ -798,19 +846,19 @@ function ReviewStage({
   useEffect(() => {
     runLocal();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [project.directory, project.files.writing, config]);
+  }, [project.directory, project.files.writing, project.files.format, project.entries, project.article.title, config]);
 
   async function aiReview() {
     setBusy(true);
     try {
-      const local = result || runLocal();
+      const local = runLocal();
       const labels = { block: '阻断', warning: '警告', suggestion: '建议' } as Record<string, string>;
       const rank = { block: 0, warning: 1, suggestion: 2 } as Record<string, number>;
       const localIssues = [...(local.issues || [])]
         .sort((left: any, right: any) => (rank[left.level] ?? 3) - (rank[right.level] ?? 3))
         .slice(0, 20)
         .map((item: any) => (labels[item.level] || '问题') + ' · ' + item.category + '：' + item.message);
-      const prompt = buildReviewPrompt(config, project.article, project.files.writing || project.files.format, {
+      const prompt = buildReviewPrompt(config, project.article, reviewSourceFor(project), {
         localIssues,
       });
       const supplement = await completeTextResult(prompt.system, prompt.user, modelId, 2500);
@@ -829,16 +877,119 @@ function ReviewStage({
       setBusy(false);
     }
   }
+  async function fixBlocks() {
+    const source = reviewSourceFor(project);
+    const sourcePath = project.files.writing
+      ? project.directory + '/draft.md'
+      : project.directory + '/article.md';
+    const local = runLocal();
+    const blockers = (local.issues || []).filter((item: any) => item.level === 'block');
+    if (!blockers.length) {
+      notify('当前没有阻断项，可以直接进入排版。', 'info');
+      return;
+    }
+    setBusy(true);
+    setFixMessage(null);
+    try {
+      const prompt = buildBlockFixPrompt(config, project.article, source, { issues: blockers });
+      const maxTokens = Math.max(4000, Math.min(16000, Math.ceil(source.length * 1.4) + 1200));
+      const response = await completeTextResult(prompt.system, prompt.user, modelId, maxTokens, 0.2);
+      if (response.truncated) {
+        setFixMessage({ text: 'AI 修复结果被截断，正文未修改。请换用更快的文本模型后重试。', tone: 'warning' });
+        notify('AI 修复结果被截断，正文未修改。', 'warning');
+        return;
+      }
+      if (!acceptsBlockFixFinish(response.finishReason)) {
+        setFixMessage({ text: 'AI 返回异常结束状态「' + response.finishReason + '」，正文未修改。', tone: 'warning' });
+        notify('AI 未正常完成修复，正文未修改。', 'warning');
+        return;
+      }
+      if (!response.content.trim()) {
+        setFixMessage({ text: 'AI 没有返回修复后的正文，正文未修改。', tone: 'warning' });
+        notify('AI 没有返回修复后的正文。', 'warning');
+        return;
+      }
+      const applied = await applyBlockFix(api, {
+        directory: project.directory,
+        source,
+        sourcePath,
+        articleTitle: project.article.title,
+        config,
+        content: response.content,
+      });
+      if (!applied.ok) {
+        if (applied.reason === 'images') {
+          setFixMessage({ text: 'AI 修改或删除了原稿的配图占位符，正文未修改。请重试。', tone: 'danger' });
+          notify('AI 修改了原稿配图标记，正文未修改。', 'warning');
+          return;
+        }
+        if (applied.reason === 'content') {
+          setFixMessage({ text: 'AI 返回内容与原稿差异过大，正文未修改。请重试或换用更稳健的文本模型。', tone: 'danger' });
+          notify('AI 修改范围过大，正文未修改。', 'warning');
+          return;
+        }
+        if (applied.reason === 'stale') {
+          setFixMessage({ text: '正文在 AI 处理期间已被修改，本次结果未写入。请重新检测后再处理。', tone: 'warning' });
+          notify('正文已发生变化，AI 修复结果未写入。', 'warning');
+          return;
+        }
+        if (applied.reason === 'write') {
+          const rollbackFailures = Array.isArray(applied.rollbackFailures) ? applied.rollbackFailures : [];
+          const rollbackText = rollbackFailures.length
+            ? '自动回滚失败：' + rollbackFailures.join('、') + '，请立即检查工作区。'
+            : '已回滚写入。';
+          setFixMessage({ text: 'AI 修复写入失败，' + rollbackText, tone: 'danger' });
+          notify(errorText(applied.error) + ' ' + rollbackText, 'danger');
+          return;
+        }
+        const detail = (applied.remaining || []).slice(0, 3)
+          .map((item: any) => item.category + '：' + item.message)
+          .join('；');
+        setFixMessage({
+          text: 'AI 修复后仍有 ' + (applied.remaining || []).length + ' 个阻断项，正文未修改。' + (detail ? ' ' + detail : ''),
+          tone: 'danger',
+        });
+        notify('AI 未能清除全部阻断项，正文未修改。', 'warning');
+        return;
+      }
+      if (!applied.fixed) {
+        setFixMessage({ text: 'AI 修复结果不完整，正文未修改。请重试。', tone: 'danger' });
+        notify('AI 修复结果不完整，正文未修改。', 'warning');
+        return;
+      }
+      await appendLog(api, project.directory, 'AI 处理 ' + blockers.length + ' 个阻断项，本地复检通过。').catch(() => {});
+      setResult(applied.fixed.review);
+      reviewSource.current = applied.fixed.markdown;
+      setAiValue(String(applied.reviewText || formatReviewMarkdown(applied.fixed.review)));
+      setFixMessage({ text: 'AI 已处理 ' + blockers.length + ' 个阻断项，本地复检通过。现在可以进入排版。', tone: 'info' });
+      notify('阻断项已清除，可以进入排版。', 'success');
+      await onReload();
+    } catch (error) {
+      notify(isTimeoutError(error) ? 'AI 处理阻断项超时，正文未修改。可以换用更快的文本模型后重试。' : errorText(error), 'danger');
+    } finally {
+      setBusy(false);
+    }
+  }
   async function save(next: boolean) {
     setBusy(true);
     try {
-      const review = result || runLocal();
-      if (next && !review.ok) {
-        notify('仍有阻断级问题，先处理后再进入排版。', 'warning');
+      if (next) {
+        const fresh = await loadProject(api, project.directory) as unknown as ArticleProject;
+        const review = reviewArticle(reviewSourceFor(fresh), config, { title: fresh.article.title });
+        setResult(review);
+        if (!review.ok) {
+          notify('仍有阻断级问题，先处理后再进入排版。', 'warning');
+          return;
+        }
+        const reviewText = mergeReviewMarkdown(formatReviewMarkdown(review), aiReviewSupplement(aiValue));
+        await api.workspace.writeText({ path: project.directory + '/review.md', text: reviewText, overwrite: true });
+        await invalidateDerivedProjectFiles(api, project.directory, { includeReview: false });
+        onNext();
         return;
       }
+      const review = runLocal();
       await api.workspace.writeText({ path: project.directory + '/review.md', text: aiValue || formatReviewMarkdown(review), overwrite: true });
-      next ? onNext() : onSaved();
+      onSaved();
     } catch (error) {
       notify(errorText(error), 'danger');
     } finally {
@@ -848,16 +999,18 @@ function ReviewStage({
   return (
     <div>
       <StageHeader title="内容审" description="分为阻断、警告、建议。AI 味 15 类指纹只作为建议，不阻断定稿。">
-        <Button type="button" onClick={() => runLocal()}>重新检测</Button>
+        <Button type="button" onClick={() => { setFixMessage(null); runLocal(); }}>重新检测</Button>
       </StageHeader>
       {result ? <ReviewSummary review={result} /> : null}
+      {fixMessage ? <div className={'notice ' + fixMessage.tone}><p>{fixMessage.text}</p></div> : null}
       <div className="toolbar toolbar-end">
         <Button type="button" onClick={() => void aiReview()} busy={busy}>补充 AI 审稿意见</Button>
       </div>
       <ResultEditor value={aiValue} onChange={setAiValue} rows={22} label="review.md" />
       <div className="toolbar toolbar-end">
         <Button type="button" onClick={() => void save(false)} busy={busy}>仅保存</Button>
-        <Button type="button" variant="primary" onClick={() => void save(true)} busy={busy} disabled={result ? !result.ok : false}>处理阻断项，进入排版</Button>
+        <Button type="button" variant={result && !result.ok ? 'primary' : 'secondary'} onClick={() => void fixBlocks()} busy={busy} disabled={!result || result.ok}>处理阻断</Button>
+        <Button type="button" variant="primary" onClick={() => void save(true)} busy={busy} disabled={!result || !result.ok}>进入排版</Button>
       </div>
     </div>
   );
