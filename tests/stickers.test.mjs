@@ -4,6 +4,7 @@ import { normalizeConfigForSave } from '../src/lib/config.mjs';
 import { buildStickerPrompt } from '../src/lib/prompts.mjs';
 import {
   normalizeStickerLanguage,
+  normalizeStickerAspect,
   normalizeStickerPlan,
   parseStickerSession,
   parseStickerPlanContent,
@@ -20,6 +21,7 @@ import {
   stickerItemDuplicateIssues,
   stickerMessageTitle,
   stickerOutlineMarkdown,
+  stickerPlanAspectChanged,
   stickerPlanBriefIssues,
   stickerPlanIssues,
   stickerPublicationFingerprintPayload,
@@ -50,9 +52,12 @@ test('sticker prompt carries the unified theme language', () => {
   const prompt = buildStickerPrompt({ sticker_language: '繁體中文', multi_image_count: 3 }, {
     topic: '算力券',
     count: 3,
+    aspect: '3:4',
   });
   assert.match(prompt.system, /整组统一主题语言：繁體中文/);
+  assert.match(prompt.system, /图片画幅：竖版 3:4/);
   assert.match(prompt.user, /统一主题语言：繁體中文/);
+  assert.match(prompt.user, /图片画幅：竖版 3:4/);
   assert.doesNotMatch(prompt.system, /简体中文。画面内/);
 });
 
@@ -138,6 +143,7 @@ test('sticker generation prompt carries the per-image plan brief', () => {
     summary: '从算力到场景拆解变化。',
     style: '统一手绘',
     medium: '马克笔白板',
+    aspect: '4:3',
     index: 2,
     count: 3,
     language: '简体中文',
@@ -148,6 +154,7 @@ test('sticker generation prompt carries the per-image plan brief', () => {
     },
   });
   assert.match(prompt, /本张位置：第 2 \/ 3 张/);
+  assert.match(prompt, /图片画幅：横版 4:3（宽高比 4:3）/);
   assert.match(prompt, /本张方案小结（只讲这个观点）：小模型先跑通高频场景/);
   assert.match(prompt, /整组叙事线：知识点递进/);
   assert.match(prompt, /画面提示词：手机屏幕里的语音助手/);
@@ -207,6 +214,7 @@ test('sticker outline follows the repository skill table', () => {
   assert.match(outline, /\*\*张数\*\*：2 张/);
   assert.match(outline, /\*\*贴图类型\*\*：知识卡片/);
   assert.match(outline, /\*\*叙事线\*\*：知识点递进/);
+  assert.match(outline, /\*\*图片比例\*\*：竖版 3:4/);
   assert.match(outline, /\| 序号 \| 画面描述（方案小结） \| 配文 \| Prompt 要点 \|/);
   assert.match(outline, /\| 1 \| 算力下沉 \| 算力不再只堆在云端。 \| 芯片特写 \|/);
 });
@@ -337,6 +345,7 @@ test('sticker fingerprint covers publish metadata and full image paths', () => {
     summary: '从兑付到核销拆解算力券。',
     medium: '马克笔白板',
     style: '统一手绘',
+    aspect: '4:3',
     needOpenComment: 0,
     onlyFansCanComment: 1,
     items: [{ ...items[0], viewpoint: '兑付链路' }, items[1], items[2]],
@@ -351,11 +360,15 @@ test('sticker fingerprint covers publish metadata and full image paths', () => {
   assert.equal(payload.summary, '从兑付到核销拆解算力券。');
   assert.equal(payload.medium, '马克笔白板');
   assert.equal(payload.style, '统一手绘');
+  assert.equal(payload.aspect, '4:3');
   assert.equal(payload.items[0].file, 'posts/stickers/a/imgs/one.jpg');
   assert.equal(payload.items[0].prompt, '第一张');
   assert.equal(payload.items[0].relative, 'imgs/one.jpg');
   assert.equal(payload.items[0].mtime, 9);
   assert.equal(payload.items[0].viewpoint, '兑付链路');
+  const landscape = stickerPublicationFingerprintPayload({ title: '算力券', aspect: '4:3', items: [items[0]] });
+  const portrait = stickerPublicationFingerprintPayload({ title: '算力券', aspect: '3:4', items: [items[0]] });
+  assert.notEqual(landscape, portrait);
 });
 
 test('sticker session restores items, files and pending state safely', () => {
@@ -365,6 +378,7 @@ test('sticker session restores items, files and pending state safely', () => {
     style: '统一手绘',
     medium: '马克笔白板',
     language: 'English',
+    aspect: '1:1',
     planLanguage: 'English',
     type: '知识卡片',
     narrative: '知识点递进',
@@ -385,6 +399,8 @@ test('sticker session restores items, files and pending state safely', () => {
   const restored = parseStickerSession(JSON.stringify(snapshot));
   assert.equal(restored.topic, '算力券');
   assert.equal(restored.language, 'English');
+  assert.equal(restored.aspect, '1:1');
+  assert.equal(restored.planAspect, '1:1');
   assert.equal(restored.planLanguage, 'English');
   assert.equal(restored.items.length, 3);
   assert.equal(restored.type, '知识卡片');
@@ -426,4 +442,31 @@ test('legacy sticker sessions restore with empty plan fields', () => {
   assert.equal(restored.narrative, '');
   assert.equal(restored.summary, '');
   assert.equal(restored.planLanguage, '');
+  assert.equal(restored.aspect, '3:4');
+  assert.equal(restored.planAspect, '1:1');
+  const restoredWithImage = parseStickerSession(JSON.stringify({
+    schemaVersion: 1,
+    topic: '旧图片',
+    items: [{ id: 's-1', prompt: '旧提示词', caption: '旧配文' }],
+    filesByItem: { 's-1': 'posts/stickers/legacy/imgs/sticker-s-1.jpg' },
+  }));
+  assert.equal(restoredWithImage.aspect, '1:1');
+});
+
+test('sticker aspect defaults to portrait and rejects unsupported values', () => {
+  assert.equal(normalizeStickerAspect('3:4'), '3:4');
+  assert.equal(normalizeStickerAspect('16:9'), '16:9');
+  assert.equal(normalizeStickerAspect('2.35:1'), '3:4');
+  assert.equal(normalizeStickerAspect(''), '3:4');
+  assert.equal(stickerPlanAspectChanged(items, '3:4', '4:3'), true);
+  assert.equal(stickerPlanAspectChanged(items, '3:4', '3:4'), false);
+  assert.equal(stickerPlanAspectChanged([], '3:4', '4:3'), false);
+  const mismatch = parseStickerSession(JSON.stringify({
+    schemaVersion: 1,
+    aspect: '4:3',
+    planAspect: '3:4',
+    items: [{ id: 's-1', prompt: '旧提示词', caption: '旧配文' }],
+  }));
+  assert.equal(mismatch.aspect, '4:3');
+  assert.equal(mismatch.planAspect, '3:4');
 });

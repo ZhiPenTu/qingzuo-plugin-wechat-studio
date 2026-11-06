@@ -7,9 +7,39 @@ export const STICKER_LANGUAGES = [
 ];
 
 export const DEFAULT_STICKER_LANGUAGE = '简体中文';
+export const DEFAULT_STICKER_ASPECT = '3:4';
 export const STICKER_SESSION_PATH = 'posts/stickers/.sticker-session.json';
 export const STICKER_TYPES = ['场景故事', '知识卡片', '产品展示', '节日祝福', '投票互动'];
 export const STICKER_MESSAGE_TITLE_LIMIT = 32;
+export const STICKER_ASPECTS = [
+  { value: '3:4', label: '竖版 3:4（推荐）' },
+  { value: '1:1', label: '方形 1:1' },
+  { value: '4:3', label: '横版 4:3' },
+  { value: '16:9', label: '横版 16:9' },
+];
+
+export function normalizeStickerAspect(value) {
+  const aspect = String(value || '').trim();
+  return STICKER_ASPECTS.some(item => item.value === aspect) ? aspect : DEFAULT_STICKER_ASPECT;
+}
+
+export function stickerAspectDescription(value) {
+  const aspect = normalizeStickerAspect(value);
+  return {
+    '3:4': '竖版 3:4',
+    '1:1': '方形 1:1',
+    '4:3': '横版 4:3',
+    '16:9': '横版 16:9',
+  }[aspect];
+}
+
+export function stickerPlanAspectChanged(items = [], planAspect = '', aspect = DEFAULT_STICKER_ASPECT) {
+  return Boolean(
+    (Array.isArray(items) ? items : []).length
+    && planAspect
+    && normalizeStickerAspect(planAspect) !== normalizeStickerAspect(aspect),
+  );
+}
 
 export function stickerMessageTitle(value) {
   return [...String(value || '').trim()].slice(0, STICKER_MESSAGE_TITLE_LIMIT).join('');
@@ -209,16 +239,20 @@ export function stickerGenerationPrompt({
   summary = '',
   style = '',
   medium = '',
+  aspect = DEFAULT_STICKER_ASPECT,
   index = 1,
   count = 1,
   language = DEFAULT_STICKER_LANGUAGE,
   item = {},
 } = {}) {
+  const normalizedAspect = normalizeStickerAspect(aspect);
   const lines = [
     '整组贴图主题：' + (String(topic || '').trim() || '今日分享'),
     type ? '贴图类型：' + String(type).trim() : '',
     narrative ? '整组叙事线：' + String(narrative).trim() : '',
     summary ? '整组主旨：' + String(summary).trim() : '',
+    '图片画幅：' + stickerAspectDescription(normalizedAspect) + '（宽高比 ' + normalizedAspect + '）。'
+      + '请按完整画布构图，四周至少预留 6% 安全边距；标题、数字、人物和说明文字必须完整显示，不得贴边或被裁切。',
     '本张位置：第 ' + Math.max(1, Number(index) || 1) + ' / ' + Math.max(1, Number(count) || 1) + ' 张。',
     item?.viewpoint ? '本张方案小结（只讲这个观点）：' + String(item.viewpoint).trim() : '',
     style ? '统一风格：' + String(style).trim() : '',
@@ -235,7 +269,7 @@ function tableCell(value) {
 /**
  * @param {{
  *   title?: string, type?: string, narrative?: string, summary?: string,
- *   style?: string, medium?: string,
+ *   style?: string, medium?: string, aspect?: string,
  *   items?: Array<{ viewpoint?: string, prompt?: string, caption?: string }>,
  * }} [plan]
  */
@@ -246,6 +280,7 @@ export function stickerOutlineMarkdown({
   summary = '',
   style = '',
   medium = '',
+  aspect = DEFAULT_STICKER_ASPECT,
   items = [],
 } = {}) {
   const heading = String(title || '今日分享').trim() || '今日分享';
@@ -257,6 +292,7 @@ export function stickerOutlineMarkdown({
     '**贴图类型**：' + (String(type || '').trim() || '未定'),
     '**叙事线**：' + (String(narrative || '').trim() || '未定'),
     '**统一形态**：' + ([String(style || '').trim(), String(medium || '').trim()].filter(Boolean).join(' · ') || '未定'),
+    '**图片比例**：' + stickerAspectDescription(aspect),
   ];
   if (String(summary || '').trim()) lines.push('**整组主旨**：' + String(summary).trim());
   lines.push(
@@ -429,6 +465,7 @@ function commentToggle(value, fallback) {
  *   summary?: string,
  *   medium?: string,
  *   style?: string,
+ *   aspect?: string,
  *   needOpenComment?: boolean | number | string,
  *   onlyFansCanComment?: boolean | number | string,
  *   items?: Array<{ id: string, viewpoint?: string, prompt?: string, caption?: string }>,
@@ -447,6 +484,7 @@ export function stickerPublicationFingerprintPayload({
   summary = '',
   medium = '',
   style = '',
+  aspect = DEFAULT_STICKER_ASPECT,
   needOpenComment = true,
   onlyFansCanComment = false,
   items = [],
@@ -482,6 +520,7 @@ export function stickerPublicationFingerprintPayload({
     summary: String(summary || '').trim(),
     medium: String(medium || '').trim(),
     style: String(style || '').trim(),
+    aspect: normalizeStickerAspect(aspect),
     needOpenComment: commentToggle(needOpenComment, true),
     onlyFansCanComment: commentToggle(onlyFansCanComment, false),
     items: imagePayload,
@@ -490,8 +529,8 @@ export function stickerPublicationFingerprintPayload({
 
 /**
  * @param {{
- *   topic?: string, count?: number, style?: string, medium?: string, language?: string,
- *   planLanguage?: string, type?: string, narrative?: string, summary?: string,
+ *   topic?: string, count?: number, style?: string, medium?: string, language?: string, aspect?: string,
+ *   planLanguage?: string, planAspect?: string, type?: string, narrative?: string, summary?: string,
  *   title?: string, digest?: string, items?: Array<{ id: string, viewpoint?: string, prompt?: string, caption?: string }>,
  *   directory?: string, filesByItem?: Record<string, string>,
  *   itemStates?: Record<string, { state?: string, error?: string, taskId?: string }>, accountId?: string,
@@ -504,7 +543,9 @@ export function stickerSessionSnapshot({
   style = '',
   medium = '',
   language = DEFAULT_STICKER_LANGUAGE,
+  aspect = DEFAULT_STICKER_ASPECT,
   planLanguage = '',
+  planAspect = '',
   type = '',
   narrative = '',
   summary = '',
@@ -525,7 +566,9 @@ export function stickerSessionSnapshot({
     style: String(style || ''),
     medium: String(medium || ''),
     language: normalizeStickerLanguage(language),
+    aspect: normalizeStickerAspect(aspect),
     planLanguage: String(planLanguage || ''),
+    planAspect: normalizeStickerAspect(planAspect || aspect),
     type: String(type || ''),
     narrative: String(narrative || ''),
     summary: String(summary || '').slice(0, 200),
@@ -579,13 +622,23 @@ export function parseStickerSession(text) {
   if (!String(receipt.stickersDirectory || '').startsWith('posts/stickers/') || String(receipt.stickersDirectory || '').split('/').includes('..')) {
     delete receipt.stickersDirectory;
   }
+  const filesByItem = value.filesByItem && typeof value.filesByItem === 'object'
+    ? Object.fromEntries(Object.entries(value.filesByItem).map(([id, path]) => [String(id), String(path || '')]))
+    : {};
+  const legacyAspect = !value.aspect && Object.values(filesByItem).some(Boolean) ? '1:1' : DEFAULT_STICKER_ASPECT;
+  const restoredAspect = normalizeStickerAspect(value.aspect || legacyAspect);
+  const restoredPlanAspect = normalizeStickerAspect(
+    value.planAspect || (value.aspect ? value.aspect : '1:1'),
+  );
   return {
     topic: String(value.topic || ''),
     count: Math.min(9, Math.max(1, Number(value.count) || items.length)),
     style: String(value.style || ''),
     medium: String(value.medium || ''),
     language: normalizeStickerLanguage(value.language),
+    aspect: restoredAspect,
     planLanguage: String(value.planLanguage || ''),
+    planAspect: restoredPlanAspect,
     type: String(value.type || ''),
     narrative: String(value.narrative || ''),
     summary: String(value.summary || '').slice(0, 200),
@@ -593,9 +646,7 @@ export function parseStickerSession(text) {
     digest: String(value.digest || '').slice(0, 120),
     items,
     directory: directory.startsWith('posts/stickers/') && !directory.split('/').includes('..') ? directory : '',
-    filesByItem: value.filesByItem && typeof value.filesByItem === 'object'
-      ? Object.fromEntries(Object.entries(value.filesByItem).map(([id, path]) => [String(id), String(path || '')]))
-      : {},
+    filesByItem,
     itemStates: value.itemStates && typeof value.itemStates === 'object'
       ? Object.fromEntries(Object.entries(value.itemStates).map(([id, state]) => [String(id), {
         state: String(state?.state || ''),

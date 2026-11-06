@@ -105,6 +105,7 @@ test('sticker project materializes JPEG assets in a drafts article project', asy
     items,
     filesByItem,
     medium: '马克笔白板',
+    aspect: '3:4',
     language: '简体中文',
     config: { default_author: '读以观心', need_open_comment: 1, only_fans_can_comment: 0 },
     draftsRoot: 'drafts',
@@ -125,9 +126,11 @@ test('sticker project materializes JPEG assets in a drafts article project', asy
   assert.equal(await stickerProjectArticleFingerprint(api, project.directory), project.articleFingerprint);
   const imagePlan = JSON.parse(files.get(project.directory + '/img-plan.json'));
   assert.equal(imagePlan.cover.file, 'imgs/sticker-01.jpg');
+  assert.equal(imagePlan.cover.aspect, '3:4');
   assert.equal(imagePlan.items.length, 2);
   assert.equal(imagePlan.items[0].slotIndex, 1);
   assert.equal(imagePlan.items[0].file, 'imgs/sticker-02.jpg');
+  assert.equal(imagePlan.items[0].aspect, '3:4');
   assert.equal(await stickerProjectReady(api, project.directory, project.relativeFiles), true);
   sizes.set(project.directory + '/imgs/sticker-02.jpg', 1024 * 1024 + 1);
   assert.equal(await stickerProjectReady(api, project.directory, project.relativeFiles), false);
