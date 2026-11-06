@@ -9,6 +9,11 @@ export const STICKER_LANGUAGES = [
 export const DEFAULT_STICKER_LANGUAGE = '简体中文';
 export const STICKER_SESSION_PATH = 'posts/stickers/.sticker-session.json';
 export const STICKER_TYPES = ['场景故事', '知识卡片', '产品展示', '节日祝福', '投票互动'];
+export const STICKER_MESSAGE_TITLE_LIMIT = 32;
+
+export function stickerMessageTitle(value) {
+  return [...String(value || '').trim()].slice(0, STICKER_MESSAGE_TITLE_LIMIT).join('');
+}
 
 export function normalizeStickerLanguage(value) {
   const language = String(value || '').trim();
@@ -164,7 +169,7 @@ export function normalizeStickerPlan(value, {
   });
   if (issues.length) throw new Error(issues[0]);
   return {
-    title: [...trimmedText(value?.title, topic || '今日分享')].slice(0, 64).join(''),
+    title: stickerMessageTitle(trimmedText(value?.title, topic || '今日分享')),
     type: planType,
     narrative: planNarrative,
     summary: planSummary,
@@ -378,6 +383,26 @@ export function stickerPublishBlocked(state) {
   ].includes(String(state || ''));
 }
 
+export function stickerDraftMatches({
+  fingerprintReady = false,
+  mediaId = '',
+  delivery = '',
+  accountId = '',
+  receiptAccountId = '',
+  receiptFingerprint = '',
+  fingerprint = '',
+} = {}) {
+  return Boolean(
+    fingerprintReady
+    && mediaId
+    && delivery === 'image'
+    && accountId
+    && receiptAccountId === accountId
+    && receiptFingerprint
+    && receiptFingerprint === fingerprint,
+  );
+}
+
 export function stickerResetReceipt() {
   return {
     state: 'draft-reset',
@@ -404,7 +429,6 @@ function commentToggle(value, fallback) {
  *   summary?: string,
  *   medium?: string,
  *   style?: string,
- *   author?: string,
  *   needOpenComment?: boolean | number | string,
  *   onlyFansCanComment?: boolean | number | string,
  *   items?: Array<{ id: string, viewpoint?: string, prompt?: string, caption?: string }>,
@@ -423,7 +447,6 @@ export function stickerPublicationFingerprintPayload({
   summary = '',
   medium = '',
   style = '',
-  author = '',
   needOpenComment = true,
   onlyFansCanComment = false,
   items = [],
@@ -459,7 +482,6 @@ export function stickerPublicationFingerprintPayload({
     summary: String(summary || '').trim(),
     medium: String(medium || '').trim(),
     style: String(style || '').trim(),
-    author: String(author || '').trim(),
     needOpenComment: commentToggle(needOpenComment, true),
     onlyFansCanComment: commentToggle(onlyFansCanComment, false),
     items: imagePayload,
@@ -507,7 +529,7 @@ export function stickerSessionSnapshot({
     type: String(type || ''),
     narrative: String(narrative || ''),
     summary: String(summary || '').slice(0, 200),
-    title: [...String(title || '')].slice(0, 64).join(''),
+    title: stickerMessageTitle(title),
     digest: String(digest || '').slice(0, 120),
     items: (Array.isArray(items) ? items : []).map(item => ({
       id: String(item.id || ''),
@@ -567,7 +589,7 @@ export function parseStickerSession(text) {
     type: String(value.type || ''),
     narrative: String(value.narrative || ''),
     summary: String(value.summary || '').slice(0, 200),
-    title: [...String(value.title || '')].slice(0, 64).join(''),
+    title: stickerMessageTitle(value.title),
     digest: String(value.digest || '').slice(0, 120),
     items,
     directory: directory.startsWith('posts/stickers/') && !directory.split('/').includes('..') ? directory : '',

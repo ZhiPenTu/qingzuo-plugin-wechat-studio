@@ -143,12 +143,14 @@ test('sticker project materializes JPEG assets in a drafts article project', asy
     config: { default_author: '读以观心', need_open_comment: 1, only_fans_can_comment: 0 },
   });
   assert.equal(payload.article.articleDir, project.directory);
-  assert.equal(payload.article.assets.length, 3);
-  assert.equal(payload.article.cover.path, project.directory + '/imgs/sticker-01.jpg');
+  assert.equal(payload.article.type, 'image');
+  assert.equal(payload.article.images.length, 3);
+  assert.equal(payload.article.images[0].path, project.directory + '/imgs/sticker-01.jpg');
+  assert.equal(payload.article.digest, project.digest);
   assert.equal(payload.article.needOpenComment, true);
   assert.equal(payload.article.onlyFansCanComment, false);
-  assert.doesNotMatch(payload.article.html, /src="imgs\//);
-  assert.match(payload.article.html, /src="qingzuo-asset:asset-/);
+  assert.equal('html' in payload.article, false);
+  assert.equal('cover' in payload.article, false);
 });
 
 test('sticker project rejects non-drafts publishing and non-JPEG conversion', async () => {
@@ -171,8 +173,8 @@ test('sticker project rejects non-drafts publishing and non-JPEG conversion', as
     directory: 'drafts/20261103-demo',
     relativeFiles: { 's-1': 'imgs/sticker-01.jpg' },
     items: [items[0]],
-    title: '标'.repeat(65),
-  }), /64/);
+    title: '标'.repeat(33),
+  }), /32/);
 
   const { api, files, directories } = memoryApi();
   files.set('posts/stickers/demo/s-1.webp', 'c291cmNl');

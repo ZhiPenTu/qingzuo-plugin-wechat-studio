@@ -18,10 +18,12 @@ import {
   stickerGenerationPrompt,
   stickerImageItems,
   stickerItemDuplicateIssues,
+  stickerMessageTitle,
   stickerOutlineMarkdown,
   stickerPlanBriefIssues,
   stickerPlanIssues,
   stickerPublicationFingerprintPayload,
+  stickerDraftMatches,
   stickerPublishBlocked,
   stickerProjectMarkdown,
   stickerResetReceipt,
@@ -310,6 +312,21 @@ test('sticker known failures can be retried and unknown states reset safely', ()
   });
 });
 
+test('sticker draft matching requires the image-message delivery marker', () => {
+  const current = {
+    fingerprintReady: true,
+    mediaId: 'draft-1',
+    accountId: 'wx-account',
+    receiptAccountId: 'wx-account',
+    receiptFingerprint: 'fingerprint',
+    fingerprint: 'fingerprint',
+  };
+  assert.equal(stickerDraftMatches({ ...current, delivery: 'image' }), true);
+  assert.equal(stickerDraftMatches({ ...current, delivery: '' }), false);
+  assert.equal(stickerDraftMatches({ ...current, delivery: 'news' }), false);
+  assert.equal(stickerDraftMatches({ ...current, delivery: 'image', fingerprint: 'changed' }), false);
+});
+
 test('sticker fingerprint covers publish metadata and full image paths', () => {
   const payload = JSON.parse(stickerPublicationFingerprintPayload({
     title: '算力券',
@@ -320,7 +337,6 @@ test('sticker fingerprint covers publish metadata and full image paths', () => {
     summary: '从兑付到核销拆解算力券。',
     medium: '马克笔白板',
     style: '统一手绘',
-    author: '作者',
     needOpenComment: 0,
     onlyFansCanComment: 1,
     items: [{ ...items[0], viewpoint: '兑付链路' }, items[1], items[2]],
@@ -328,7 +344,6 @@ test('sticker fingerprint covers publish metadata and full image paths', () => {
     outputFiles: [{ path: 'posts/stickers/a/imgs/one.jpg', size: 100, mtime: 9 }],
     directory: 'posts/stickers/a',
   }));
-  assert.equal(payload.author, '作者');
   assert.equal(payload.needOpenComment, false);
   assert.equal(payload.onlyFansCanComment, true);
   assert.equal(payload.type, '知识卡片');
@@ -381,6 +396,23 @@ test('sticker session restores items, files and pending state safely', () => {
   assert.equal(restored.receipt.state, 'draft-unknown');
   assert.equal(parseStickerSession('{bad json'), null);
   assert.equal(parseStickerSession(JSON.stringify({ ...snapshot, directory: 'posts/../../secret' })).directory, '');
+});
+
+test('sticker sessions keep image-message titles within the WeChat limit', () => {
+  const snapshot = stickerSessionSnapshot({ title: '标'.repeat(40), count: 1 });
+  assert.equal([...snapshot.title].length, 32);
+  assert.equal([...stickerMessageTitle('标'.repeat(40))].length, 32);
+  const plan = normalizeStickerPlan({
+    title: '标'.repeat(40),
+    type: '知识卡片',
+    narrative: '知识点递进',
+    summary: '从兑付到核销拆解算力券。',
+    images: [
+      { viewpoint: '兑付链路', prompt: '第一张', caption: '第一张配文' },
+      { viewpoint: '核销边界', prompt: '第二张', caption: '第二张配文' },
+    ],
+  }, { count: 2 });
+  assert.equal([...plan.title].length, 32);
 });
 
 test('legacy sticker sessions restore with empty plan fields', () => {

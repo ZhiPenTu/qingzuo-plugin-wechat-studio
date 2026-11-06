@@ -9,6 +9,9 @@ export interface BrowserSnapshot { tabId: string; url: string; title: string; no
 export type BrowserAction = { tabId?: string } & ({ action: 'click' | 'hover'; ref: string } | { action: 'type' | 'select'; ref: string; value: string } | { action: 'scroll'; value: number });
 export interface BrowserActionResult { tabId: string; url: string; action: 'click' | 'type' | 'select' | 'scroll' | 'hover'; ok: true; value?: string; scrollY?: number }
 export interface BrowserWaitOptions { tabId?: string; selector?: string; text?: string; absent?: boolean; timeoutMs?: number }
+/** 宿主调试日志条目；敏感值在写入和事件分发前已脱敏。 */
+export interface PluginDebugLogEntry { seq: number; time: number; scope: 'app' | 'plugin' | 'browser'; source: string; level: 'debug' | 'info' | 'warn' | 'error'; message: string; line?: number; url?: string }
+export interface PluginDebugLogBatch { sessionId: string; entries: PluginDebugLogEntry[]; nextCursor?: number }
 export interface StorageFile { token: string; name: string; size: number; mime: string }
 export type CredentialEnvironment = 'production' | 'sandbox';
 /** `appId` 是可公开的标识；`secretKey` 永远不会返回给插件。 */
@@ -30,7 +33,7 @@ export interface DownloadTask {
   createdAt: number; updatedAt: number; completedAt: number | null;
   canPause: boolean; canResume: boolean; canCancel: boolean; canRemove: boolean; canReveal: boolean;
 }
-export interface PluginBridge { invoke<T = unknown>(method: string, args?: unknown): Promise<T>; onDispose(callback: () => void): () => void; onAI?(callback: (event: AIEvent) => void): () => void; onBrowser?(callback: (event: BrowserEvent) => void): () => void }
+export interface PluginBridge { invoke<T = unknown>(method: string, args?: unknown): Promise<T>; onDispose(callback: () => void): () => void; onAI?(callback: (event: AIEvent) => void): () => void; onBrowser?(callback: (event: BrowserEvent) => void): () => void; onDebugLog?(callback: (event: PluginDebugLogBatch) => void): () => void }
 export interface PluginManifest {
   manifestVersion: 1; id: string; title: string; description: string; api: string;
   ui: string; category?: string; releaseNotes?: string; icon?: string;
@@ -99,7 +102,7 @@ export function createPluginClient(bridge?: PluginBridge): {
   wechat: {
     accounts(): Promise<WechatAccountSummary[]>;
     verify(options: { accountId: string }): Promise<{ ok: true }>;
-    createDraft(options: { accountId: string; article: WechatArticleInput }): Promise<{ mediaId: string }>;
+    createDraft(options: { accountId: string; article: WechatDraftArticleInput }): Promise<{ mediaId: string }>;
     publish(options: { accountId: string; mediaId: string }): Promise<{ publishId: string }>;
     publishStatus(options: { accountId: string; publishId?: string; mediaId?: string }): Promise<WechatPublishStatus>;
     list(options: { accountId: string; type: 'draft' | 'published'; offset?: number; count?: number }): Promise<WechatListResult>;
@@ -139,10 +142,18 @@ export interface McpCallResult { content: unknown; structuredContent?: unknown; 
 export interface WechatAccountSummary { id: string; name: string; appIdMasked: string; verified: boolean }
 export interface WechatArticleAsset { placeholder: string; path: string }
 export interface WechatArticleInput {
+  type?: 'news';
   articleDir: string; title: string; author: string; digest: string; html: string;
   cover: WechatArticleAsset; assets: WechatArticleAsset[];
   needOpenComment?: boolean; onlyFansCanComment?: boolean; contentSourceUrl?: string;
 }
+export interface WechatImageArticleInput {
+  type: 'image';
+  articleDir: string; title: string; digest: string;
+  images: WechatArticleAsset[];
+  needOpenComment?: boolean; onlyFansCanComment?: boolean;
+}
+export type WechatDraftArticleInput = WechatArticleInput | WechatImageArticleInput;
 export interface WechatPublishStatus { publishId?: string | null; status: 'pending' | 'success' | 'failed' | 'unknown'; failIdx?: number; articleUrl?: string; error?: string }
 export interface WechatListItem { mediaId: string; title: string; status: 'draft' | 'published' | 'failed' | 'unknown'; updatedAt?: number; articleUrl?: string }
 export interface WechatListResult { items: WechatListItem[]; total: number }

@@ -210,7 +210,7 @@ export function buildStickerPrompt(config = {}, options = {}) {
       '',
       '## 输出格式',
       '只输出一个 JSON 对象，不要 Markdown 围栏或解释：',
-      '{"title":"≤64字标题","type":"贴图类型","narrative":"叙事线说明","summary":"整组主旨，40–100字","images":[{"viewpoint":"本张观点","prompt":"画面提示词","caption":"配文"}]}',
+      '{"title":"≤32字标题","type":"贴图类型","narrative":"叙事线说明","summary":"整组主旨，40–100字","images":[{"viewpoint":"本张观点","prompt":"画面提示词","caption":"配文"}]}',
       'images 固定 ' + count + ' 项，顺序就是发布顺序。',
       '',
       '## 本篇统一约束',
