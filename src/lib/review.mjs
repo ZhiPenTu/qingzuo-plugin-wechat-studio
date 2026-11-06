@@ -1,32 +1,168 @@
-import { checkDraft, splitMarkdownBlocks } from './writing.mjs';
+import { checkDraft, normalizeBodyMarkdown, splitMarkdownBlocks } from './writing.mjs';
 import { isCoverImageAlt } from './markdown.mjs';
+import { fencesBalanced, lineCodeFlags } from './markdown-syntax.mjs';
 
 const SEVERITY_ORDER = { block: 0, warning: 1, suggestion: 2 };
-const PLACEHOLDER_PATTERN = /!\[([^\]]*)\]\(\s*(placeholder(?:-[^)\s]+)?)(?:\s+["“'‘].*?["”'’])?\s*\)/g;
+const RAW_IMAGE_PATTERN = /!\[([^\]]*)\]\(([^)]*)\)/g;
 
 function issue(level, category, message, excerpt = '', signal = '') {
   return { level, category, message, excerpt: String(excerpt || '').slice(0, 160), ...(signal ? { signal } : {}) };
 }
 
 export function findImagePlaceholders(markdown) {
-  return visibleMarkdown(markdown).split('\n').flatMap(line =>
-    [...line.matchAll(PLACEHOLDER_PATTERN)].map(match => ({
-      alt: match[1],
-      src: match[2],
-      markdown: match[0],
-    })),
-  );
+  return parseImageSyntax(markdown).markers
+    .filter(marker => marker.src.startsWith('placeholder'))
+    .map(marker => ({ alt: marker.alt, src: marker.src, markdown: marker.marker }));
+}
+
+function resolveImageReferences(markdown) {
+  const text = visibleMarkdown(markdown);
+  const definitions = new Map();
+  for (const line of text.split('\n')) {
+    const match = line.match(/^\s*\[([^\]]+)\]:\s*(\S+)(?:\s+["“'‘](.*?)["”'’])?\s*$/);
+    if (match) definitions.set(match[1].toLowerCase(), { url: match[2], title: match[3] || '' });
+  }
+  return text.split('\n').map(line => line.replace(/!\[([^\]]*)\]\[([^\]]*)\]/g, (match, alt, id) => {
+    const item = definitions.get((id || alt).toLowerCase());
+    return item ? '![' + alt + '](' + item.url + (item.title ? ' "' + item.title + '"' : '') + ')' : match;
+  })).join('\n');
+}
+
+function parseImageSyntax(markdown) {
+  const resolved = resolveImageReferences(markdown);
+  const markers = [];
+  const invalid = [];
+  for (const match of resolved.matchAll(RAW_IMAGE_PATTERN)) {
+    const alt = match[1];
+    const rawTarget = match[2].trim();
+    if (!rawTarget || rawTarget.startsWith('<')) {
+      invalid.push(match[0]);
+      continue;
+    }
+    const target = rawTarget.match(/^(\S+)(?:\s+(["“'‘][\s\S]*["”'’]))?$/);
+    if (!target) {
+      invalid.push(match[0]);
+      continue;
+    }
+    markers.push({
+      alt,
+      src: target[1],
+      title: target[2] || '',
+      marker: match[0],
+    });
+  }
+  return { markers, invalid };
+}
+
+function normalizedImagePath(value) {
+  return String(value || '').replaceAll('\\', '/');
+}
+
+function localImageMarkers(markdown) {
+  return parseImageSyntax(markdown).markers
+    .filter(marker => !/^(?:https?:)?\/\//i.test(marker.src));
+}
+
+export function preservesLocalImageMarkers(before, after) {
+  const original = localImageMarkers(before);
+  const next = localImageMarkers(after);
+  const originalFiles = original.filter(marker => !marker.src.startsWith('placeholder'));
+  const nextFiles = next.filter(marker => !marker.src.startsWith('placeholder'));
+  if (originalFiles.length !== nextFiles.length) return false;
+  if (originalFiles.some((marker, index) => marker.marker !== nextFiles[index].marker)) return false;
+
+  const placeholders = original.filter(marker => marker.src.startsWith('placeholder'));
+  if (!placeholders.length) return true;
+  const counts = new Map();
+  for (const marker of placeholders) counts.set(marker.marker, (counts.get(marker.marker) || 0) + 1);
+  for (const marker of next) {
+    if (!counts.has(marker.marker)) continue;
+    const remaining = counts.get(marker.marker) - 1;
+    if (remaining < 0) return false;
+    counts.set(marker.marker, remaining);
+  }
+  if ([...counts.values()].some(value => value !== 0)) return false;
+
+  let cursor = 0;
+  for (const marker of next) {
+    if (marker.marker === original[cursor].marker) cursor += 1;
+    if (cursor === original.length) return true;
+  }
+  return false;
+}
+
+export function preservesImageStructure(before, after) {
+  if (!preservesLocalImageMarkers(before, after)) return false;
+  const beforeSyntax = parseImageSyntax(before);
+  const afterSyntax = parseImageSyntax(after);
+  if (afterSyntax.invalid.length) return false;
+  if (afterSyntax.markers.some(marker => /^(?:https?:)?\/\//i.test(marker.src))) return false;
+
+  const externalAlts = new Map();
+  const originalPlaceholders = new Map();
+  for (const marker of beforeSyntax.markers) {
+    if (/^(?:https?:)?\/\//i.test(marker.src)) {
+      externalAlts.set(marker.alt, (externalAlts.get(marker.alt) || 0) + 1);
+    } else if (marker.src.startsWith('placeholder')) {
+      originalPlaceholders.set(marker.marker, (originalPlaceholders.get(marker.marker) || 0) + 1);
+    }
+  }
+  for (const marker of afterSyntax.markers) {
+    if (!marker.src.startsWith('placeholder')) continue;
+    const existing = originalPlaceholders.get(marker.marker) || 0;
+    if (existing > 0) {
+      originalPlaceholders.set(marker.marker, existing - 1);
+      continue;
+    }
+    const external = externalAlts.get(marker.alt) || 0;
+    if (external <= 0) return false;
+    externalAlts.set(marker.alt, external - 1);
+  }
+  return [...originalPlaceholders.values()].every(value => value === 0)
+    && [...externalAlts.values()].every(value => value === 0);
+}
+
+function contentText(markdown) {
+  return visibleMarkdown(markdown)
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
+    .replace(/\[[^\]]*\]\([^)]*\)/g, ' ')
+    .replace(/[`*_>#()[\]{}~|-]/g, ' ')
+    .toLowerCase()
+    .replace(/[^\p{Letter}\p{Number}]+/gu, '');
+}
+
+function contentShingles(text) {
+  const size = 4;
+  if (text.length < size) return new Set(text ? [text] : []);
+  const values = new Set();
+  for (let index = 0; index <= text.length - size; index += 1) values.add(text.slice(index, index + size));
+  return values;
+}
+
+export function preservesSourceContent(before, after, minimumCoverage = 0.45) {
+  const beforeText = contentText(before);
+  const afterText = contentText(after);
+  if (!beforeText) return true;
+  if (!afterText) return false;
+  const lengthRatio = afterText.length / beforeText.length;
+  if (lengthRatio < 0.7 || lengthRatio > 1.45) return false;
+  const original = contentShingles(beforeText);
+  const next = contentShingles(afterText);
+  if (!original.size) return true;
+  let matched = 0;
+  for (const value of original) if (next.has(value)) matched += 1;
+  const forward = matched / original.size;
+  const reverse = matched / next.size;
+  return forward >= Math.max(0.65, minimumCoverage) && reverse >= 0.5;
 }
 
 function visibleMarkdown(markdown) {
+  const sourceLines = String(markdown || '').split('\n');
+  const codeFlags = lineCodeFlags(sourceLines);
   const lines = [];
-  let fenced = false;
-  for (const rawLine of String(markdown || '').split('\n')) {
-    if (/^\s*```/.test(rawLine)) {
-      fenced = !fenced;
-      continue;
-    }
-    if (fenced) continue;
+  for (let index = 0; index < sourceLines.length; index += 1) {
+    if (codeFlags[index]) continue;
+    const rawLine = sourceLines[index];
     lines.push(rawLine.replace(/(`+)([\s\S]*?)\1/g, ''));
   }
   return lines.join('\n');
@@ -223,6 +359,7 @@ export function reviewArticle(markdown, config = {}, extras = {}) {
   const result = checkDraft(source, config);
   const issues = [];
 
+  if (!fencesBalanced(source.split('\n'))) issues.push(issue('block', 'Markdown', '代码围栏未闭合，无法可靠排版。'));
   for (const message of result.issues) issues.push(issue('block', '写作规范', message));
   for (const message of result.warnings) issues.push(issue('warning', '写作规范', message));
 
@@ -230,21 +367,38 @@ export function reviewArticle(markdown, config = {}, extras = {}) {
   for (const word of containsAny(source, forbidden)) {
     issues.push(issue('block', '敏感词', '命中禁用或敏感词「' + word + '」。', word));
   }
-  const markdownTitle = source.match(/^#\s+(.+)$/m)?.[1]?.trim() || source.split('\n')[0] || '';
+  const visible = visibleMarkdown(source);
+  const markdownTitle = visible.match(/^#\s+(.+)$/m)?.[1]?.trim() || visible.split('\n')[0] || '';
   const titleText = [markdownTitle, String(extras.title || '').trim()].filter(Boolean).join('\n');
-  const titleForbidden = containsAny(titleText, config.forbidden_title_phrases || []);
+  const titleForbidden = [...new Set([
+    ...containsAny(titleText, config.forbidden_title_phrases || []),
+    ...containsAny(titleText, forbidden),
+  ])];
   for (const word of titleForbidden) issues.push(issue('block', '标题规范', '标题包含禁用表达「' + word + '」。', word));
+  const titleLimit = Math.max(1, Number(config.title_max_length) || 64);
+  if ([markdownTitle, String(extras.title || '').trim()].some(value => [...value].length > titleLimit)) {
+    issues.push(issue('block', '标题规范', '标题超过 ' + titleLimit + ' 字上限。'));
+  }
 
   for (const [pattern, message] of TYPO_RULES) {
     const matches = matchesOf(source, pattern);
     for (const match of [...new Set(matches)].slice(0, 5)) issues.push(issue('warning', '错别字', message, match));
   }
 
-  const visible = visibleMarkdown(source);
   const links = matchesOf(visible, /\]\((https?:\/\/[^)\s]+)\)/g);
   if (links.length > 10) issues.push(issue('warning', '链接', '正文有 ' + links.length + ' 个外链，发布前请逐一确认可访问。'));
-  const externalImages = matchesOf(visible, /!\[[^\]]*\]\((https?:\/\/[^)\s]+)/g);
+  const imageSyntax = parseImageSyntax(source);
+  const imageMarkers = imageSyntax.markers
+    .filter(marker => !marker.src.startsWith('placeholder'));
+  const externalImages = imageMarkers.filter(marker => /^(?:https?:)?\/\//i.test(marker.src));
   if (externalImages.length) issues.push(issue('block', '图片', '正文仍含外链图片，发布前必须换成本地图片。'));
+  const invalidImages = imageMarkers.filter(marker =>
+    !/^(?:https?:)?\/\//i.test(marker.src)
+      && (normalizedImagePath(marker.src).startsWith('/')
+        || normalizedImagePath(marker.src).split('/').includes('..')
+        || /^[a-z][a-z0-9+.-]*:/i.test(marker.src)));
+  if (invalidImages.length) issues.push(issue('block', '图片', '正文含宿主无法读取的图片路径，请改为项目内相对路径。'));
+  if (imageSyntax.invalid.length) issues.push(issue('block', '图片', '正文含不支持或无法解析的图片语法。', imageSyntax.invalid[0]));
 
   const requiredReview = Array.isArray(config.review_required) ? config.review_required : [];
   if (requiredReview.includes('原创标注') && !String(config.original_attribution || '').trim()) {
@@ -308,6 +462,77 @@ export function formatReviewMarkdown(review) {
   return '# 内容审稿\n\n' +
     '阻断 ' + review.counts.block + ' · 警告 ' + review.counts.warning + ' · 建议 ' + review.counts.suggestion + '\n\n' +
     (rows.length ? rows.join('\n') : '未发现需要修改的问题。') + '\n';
+}
+
+export function normalizeBlockFixMarkdown(value) {
+  let text = String(value || '').replace(/\r\n?/g, '\n').trim();
+  const lines = text.split('\n');
+  const headingIndex = lines.findIndex(line => /^#\s+\S/.test(line));
+  if (headingIndex > 0) {
+    let openIndex = -1;
+    let fenceChar = '';
+    let fenceLength = 0;
+    for (let index = 0; index < headingIndex; index += 1) {
+      const match = lines[index].match(/^(`{3,}|~{3,})\s*(?:markdown|md)?\s*$/i);
+      if (!match) continue;
+      openIndex = index;
+      fenceChar = match[1][0];
+      fenceLength = match[1].length;
+      break;
+    }
+    if (openIndex >= 0) {
+      let closeIndex = -1;
+      for (let index = lines.length - 1; index > headingIndex; index -= 1) {
+        const match = lines[index].match(/^(`{3,}|~{3,})\s*$/);
+        if (match && match[1][0] === fenceChar && match[1].length >= fenceLength) {
+          closeIndex = index;
+          break;
+        }
+      }
+      if (closeIndex < 0) return '';
+      const inner = lines.slice(openIndex + 1, closeIndex);
+      if (!fencesBalanced(inner)) return '';
+      text = inner.join('\n').trim();
+    }
+  }
+  const firstHeading = text.search(/^#\s+\S/m);
+  if (firstHeading > 0) {
+    const prefix = text.slice(0, firstHeading);
+    text = text.slice(firstHeading);
+    if (/```/.test(prefix)) text = text.replace(/\n```\s*$/, '');
+  }
+  if (!fencesBalanced(text.split('\n'))) return '';
+  const normalized = normalizeBodyMarkdown(text);
+  return normalized ? normalized + '\n' : '';
+}
+
+export function reviewBlockFix(value, config = {}, extras = {}) {
+  const markdown = normalizeBlockFixMarkdown(value);
+  const title = markdown.match(/^#\s+(.+)$/m)?.[1]?.trim() || '';
+  const metadataTitle = String(extras.title || '').trim();
+  const review = reviewArticle(markdown, config, {
+    ...extras,
+    title: title || extras.title,
+  });
+  const metadataReview = metadataTitle && metadataTitle !== title
+    ? reviewArticle(markdown, config, { ...extras, title: metadataTitle })
+    : review;
+  const preservedImages = extras.source === undefined
+    ? true
+    : preservesImageStructure(extras.source, markdown);
+  const preservedContent = extras.source === undefined
+    ? true
+    : preservesSourceContent(extras.source, markdown);
+  return {
+    markdown,
+    title,
+    review,
+    metadataReview,
+    needsTitleSync: Boolean(title) && !metadataReview.ok,
+    preservedImages,
+    preservedContent,
+    ok: Boolean(markdown) && review.ok && preservedImages && preservedContent,
+  };
 }
 
 export const AI_REVIEW_HEADING = '## AI 补充意见';
