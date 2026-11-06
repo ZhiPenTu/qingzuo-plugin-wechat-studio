@@ -11,7 +11,7 @@ if (!executablePath) throw new Error('指定固定底座 QINGZUO_HOST_EXECUTABLE
 const pkg = JSON.parse(await readFile('package.json', 'utf8'));
 const platform = currentPlatform();
 const artifact = path.resolve('release', artifactName(pkg, platform));
-const expectedVersion = (process.env.QINGZUO_HOST_VERSION || 'v0.7.9').replace(/^v/, '');
+const expectedVersion = (process.env.QINGZUO_HOST_VERSION || 'v0.8.1').replace(/^v/, '');
 const applicationRoot = process.platform === 'darwin' ? path.resolve(executablePath, '../../..') : path.dirname(executablePath);
 const archive = path.join(applicationRoot, process.platform === 'darwin' ? 'Contents/Resources/app.asar' : 'resources/app.asar');
 const digest = createHash('sha256').update(await readFile(archive)).digest('hex');
