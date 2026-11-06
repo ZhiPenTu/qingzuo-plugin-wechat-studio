@@ -1,6 +1,12 @@
 import { mergedConfig } from './config.mjs';
 import { STAGE_FILES } from './project.mjs';
-import { normalizeStickerLanguage, stickerLanguageInstruction } from './stickers.mjs';
+import {
+  DEFAULT_STICKER_ASPECT,
+  normalizeStickerAspect,
+  normalizeStickerLanguage,
+  stickerAspectDescription,
+  stickerLanguageInstruction,
+} from './stickers.mjs';
 
 export function configContext(config = {}, article = {}) {
   const merged = mergedConfig(config, article);
@@ -187,6 +193,7 @@ export function buildImagePrompt(plan, item = {}) {
 export function buildStickerPrompt(config = {}, options = {}) {
   const count = Math.max(1, Math.min(9, Number(options.count) || config.multi_image_count || 6));
   const language = normalizeStickerLanguage(options.language || config.sticker_language);
+  const aspect = normalizeStickerAspect(options.aspect || DEFAULT_STICKER_ASPECT);
   const style = String(options.style || config.custom_sticker_style?.[0] || config.default_sticker_style?.[0] || '统一手绘').trim();
   const medium = String(options.medium || '').trim();
   const direction = String(options.direction || config.topic_direction || '').trim();
@@ -216,6 +223,7 @@ export function buildStickerPrompt(config = {}, options = {}) {
       '## 本篇统一约束',
       '- 统一风格：' + style,
       medium ? '- 统一媒介：' + medium : '',
+      '- 图片画幅：' + stickerAspectDescription(aspect) + '。每张都按这个完整画布规划主体和文字排布。',
       '- 整组统一主题语言：' + language + '。' + stickerLanguageInstruction(language),
       context ? '\n## 账号配置\n' + context : '',
     ].filter(Boolean).join('\n'),
@@ -224,6 +232,7 @@ export function buildStickerPrompt(config = {}, options = {}) {
       direction ? '内容方向：' + direction : '',
       '统一风格：' + style,
       medium ? '统一媒介：' + medium : '',
+      '图片画幅：' + stickerAspectDescription(aspect),
       '统一主题语言：' + language,
       '请先给出整组方案，再给 ' + count + ' 张互不重复的逐图观点、画面提示词和配文。',
     ].filter(Boolean).join('\n'),

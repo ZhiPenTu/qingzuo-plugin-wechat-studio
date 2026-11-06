@@ -2,7 +2,7 @@ import { base64Bytes, bytesBase64, compressBodyImageBytes } from './crop.mjs';
 import { renderMarkdownDocument } from './markdown.mjs';
 import { appendLog, createProject, loadProject, saveArticle } from './project.mjs';
 import { articlePublicationFingerprint } from './publication.mjs';
-import { stickerProjectMarkdown } from './stickers.mjs';
+import { DEFAULT_STICKER_ASPECT, normalizeStickerAspect, stickerProjectMarkdown } from './stickers.mjs';
 
 const MAX_WECHAT_BODY_IMAGE = 1024 * 1024;
 const enabled = (value, fallback) => {
@@ -45,11 +45,11 @@ export async function stickerProjectReady(api, directory, relativeFiles) {
   }
 }
 
-async function defaultConvertImage(sourceFile) {
+async function defaultConvertImage(sourceFile, aspect = DEFAULT_STICKER_ASPECT) {
   const compressed = await compressBodyImageBytes(
     base64Bytes(sourceFile.data),
     sourceFile.mime,
-    '1:1',
+    normalizeStickerAspect(aspect),
     960 * 1024,
   );
   return {
@@ -65,6 +65,7 @@ export async function materializeStickerProject(api, {
   items,
   filesByItem = {},
   medium = '',
+  aspect = DEFAULT_STICKER_ASPECT,
   language = '简体中文',
   config = {},
   draftsRoot = 'drafts',
@@ -79,7 +80,8 @@ export async function materializeStickerProject(api, {
   const projectDigest = String(digest || '').trim().slice(0, 120)
     || ('本组贴图围绕「' + projectTitle + '」展开，共 ' + sourceItems.length + ' 张。');
   const relativeFiles = stickerProjectRelativeFiles(sourceItems);
-  const convertImage = options.convertImage || defaultConvertImage;
+  const stickerAspect = normalizeStickerAspect(aspect);
+  const convertImage = options.convertImage || (sourceFile => defaultConvertImage(sourceFile, stickerAspect));
   const created = await createProject(api, {
     title: projectTitle,
     mode: 'paste',
@@ -123,7 +125,7 @@ export async function materializeStickerProject(api, {
       type: '氛围',
       caption: item.caption || '',
       style: '场景还原',
-      aspect: '1:1',
+      aspect: stickerAspect,
       role: '节奏位',
       generate: false,
       file: relativeFiles[item.id],
@@ -141,7 +143,7 @@ export async function materializeStickerProject(api, {
         source: 'sticker',
         cover: {
           style: '贴图',
-          aspect: '1:1',
+          aspect: stickerAspect,
           copy: sourceItems[0].caption || projectTitle,
           defaultCopy: projectTitle,
           prompt: '',

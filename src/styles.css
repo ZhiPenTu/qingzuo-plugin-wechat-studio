@@ -503,7 +503,7 @@ input::placeholder, textarea::placeholder { color: var(--qz-text-muted); opacity
 .sticker-item-content { display: grid; gap: 10px; align-content: start; min-width: 0; }
 .sticker-item-media { min-width: 0; }
 .sticker-item-media figure { margin: 0; border: 1px solid var(--qz-border); border-radius: 7px; overflow: hidden; background: var(--qz-surface-subtle); }
-.sticker-item-media img { display: block; width: 100%; aspect-ratio: 1; object-fit: contain; background: #1b1b1b; }
+.sticker-item-media img { display: block; width: 100%; aspect-ratio: 3 / 4; object-fit: contain; background: #1b1b1b; }
 .sticker-item-media figcaption { padding: 7px; font-size: 10.5px; line-height: 1.45; color: var(--qz-text-muted); }
 .sticker-item-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding-top: 2px; }
 .sticker-item-footer small { min-width: 0; color: var(--qz-text-muted); font-size: 10.5px; line-height: 1.45; word-break: break-word; }

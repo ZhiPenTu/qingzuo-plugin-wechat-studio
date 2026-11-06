@@ -3,8 +3,8 @@ import { api, errorText, readOptional, shortId } from './client';
 import { Badge, Button, Field } from './common';
 import { IMAGE_MEDIA, chooseMedium } from '../lib/images.mjs';
 import { buildStickerPrompt } from '../lib/prompts.mjs';
-import { imageModelLabel, imageModelSource } from '../lib/image-models.mjs';
-import { generateImagesThroughMcp, mcpBatchToken } from '../lib/mcp-images.mjs';
+import { imageModelLabel, imageModelSource, imageParametersForModel } from '../lib/image-models.mjs';
+import { generateImagesThroughMcp, mcpBatchToken, mcpImageSize } from '../lib/mcp-images.mjs';
 import { renderMarkdownDocument } from '../lib/markdown.mjs';
 import {
   materializeStickerProject,
@@ -15,9 +15,12 @@ import {
 } from '../lib/sticker-project.mjs';
 import {
   STICKER_LANGUAGES,
+  STICKER_ASPECTS,
+  DEFAULT_STICKER_ASPECT,
   STICKER_SESSION_PATH,
   STICKER_TYPES,
   mergeStickerFiles,
+  normalizeStickerAspect,
   normalizeStickerPlan,
   normalizeStickerLanguage,
   parseStickerPlanContent,
@@ -33,11 +36,13 @@ import {
   stickerMessageTitle,
   stickerOutlineMarkdown,
   stickerPlanBriefIssues,
+  stickerPlanAspectChanged,
   stickerPlanIssues,
   stickerPublicationFingerprintPayload,
   stickerPublishBlocked,
   stickerResetReceipt,
   stickerSessionSnapshot,
+  stickerAspectDescription,
 } from '../lib/stickers.mjs';
 import type { ImageModel, McpServer, Toast, WechatAccount } from './types';
 import type { StudioPreferences } from './preferences';
@@ -79,10 +84,12 @@ export function StickerPage({
 }) {
   const [topic, setTopic] = useState('');
   const [count, setCount] = useState(Number(config.multi_image_count) || 6);
+  const [aspect, setAspect] = useState(normalizeStickerAspect(DEFAULT_STICKER_ASPECT));
   const [style, setStyle] = useState(String(config.custom_sticker_style?.[0] || config.default_sticker_style?.[0] || '统一手绘'));
   const [medium, setMedium] = useState(chooseMedium(config, {}, String(config.topic_direction || '')));
   const [language, setLanguage] = useState(normalizeStickerLanguage(config.sticker_language));
   const [planLanguage, setPlanLanguage] = useState('');
+  const [planAspect, setPlanAspect] = useState('');
   const [modelId, setModelId] = useState(preferences.imageModelId || imageModels[0]?.id || '');
   const [items, setItems] = useState<StickerItem[]>([]);
   const [stickerType, setStickerType] = useState('');
@@ -144,12 +151,14 @@ export function StickerPage({
   const staleCount = items.filter(item => itemStates[item.id]?.state === 'stale').length;
   const generatedCount = currentImageCount;
   const languageChanged = Boolean(items.length && planLanguage && planLanguage !== language);
+  const aspectChanged = stickerPlanAspectChanged(items, planAspect, aspect);
   const planIssues = stickerPlanIssues(items, {
     type: stickerType,
     narrative,
     summary: planSummary,
   });
   if (languageChanged) planIssues.unshift('主题语言已修改，请重新生成整组方案或逐张核对画面文字与配文。');
+  if (aspectChanged) planIssues.unshift('图片比例已改为' + stickerAspectDescription(aspect) + '，请重新生成整组方案，再按新比例生成贴图。');
   const planReady = Boolean(items.length && !planIssues.length);
   const publishReady = Boolean(title.trim() && planReady && generatedCount === items.length && accountId);
   const operationBusy = planning || generating || Boolean(generatingItemId) || savingProject || publishBusy || !receiptHydrated;
@@ -167,10 +176,12 @@ export function StickerPage({
       if (!active || !session) return;
       setTopic(session.topic);
       setCount(session.count);
+      setAspect(normalizeStickerAspect(session.aspect));
       setStyle(session.style || style);
       setMedium(session.medium || medium);
       setLanguage(session.language);
       setPlanLanguage(session.planLanguage || session.language);
+      setPlanAspect(normalizeStickerAspect(session.planAspect || session.aspect));
       setStickerType(session.type);
       setNarrative(session.narrative);
       setPlanSummary(session.summary);
@@ -214,7 +225,7 @@ export function StickerPage({
       void persistStickerSession().catch(() => {});
     }, 350);
     return () => window.clearTimeout(timer);
-  }, [topic, count, style, medium, language, planLanguage, stickerType, narrative, planSummary, title, digest, items, filesByItem, itemStates, directory, accountId]);
+  }, [topic, count, aspect, style, medium, language, planLanguage, planAspect, stickerType, narrative, planSummary, title, digest, items, filesByItem, itemStates, directory, accountId]);
 
   useEffect(() => {
     if (preferences.imageModelId && imageModels.some(model => model.id === preferences.imageModelId)) {
@@ -275,6 +286,7 @@ export function StickerPage({
     config.default_author,
     config.need_open_comment,
     config.only_fans_can_comment,
+    aspect,
     medium,
     style,
     stickerType,
@@ -291,6 +303,7 @@ export function StickerPage({
       summary: planSummary,
       style,
       medium,
+      aspect,
       index: index >= 0 ? index + 1 : 1,
       count: items.length,
       language,
@@ -329,6 +342,7 @@ export function StickerPage({
       summary: planSummary,
       medium,
       style,
+      aspect,
       needOpenComment: config.need_open_comment,
       onlyFansCanComment: config.only_fans_can_comment,
       items,
@@ -419,10 +433,12 @@ export function StickerPage({
     const snapshot = stickerSessionSnapshot({
       topic,
       count,
+      aspect,
       style,
       medium,
       language,
       planLanguage,
+      planAspect,
       type: stickerType,
       narrative,
       summary: planSummary,
@@ -457,6 +473,7 @@ export function StickerPage({
       language,
       style,
       medium,
+      aspect,
       direction: config.topic_direction,
     });
     let lastError: unknown = null;
@@ -494,6 +511,7 @@ export function StickerPage({
           setNarrative(value.narrative);
           setPlanSummary(value.summary);
           setPlanLanguage(value.language);
+          setPlanAspect(aspect);
           setItems(nextItems);
           setFingerprintReady(false);
           setStatus(null);
@@ -514,6 +532,7 @@ export function StickerPage({
               summary: value.summary,
               style: value.style,
               medium: value.medium,
+              aspect,
               language: value.language,
               digest: nextDigest,
               items: nextItems,
@@ -546,6 +565,7 @@ export function StickerPage({
     setNarrative('');
     setPlanSummary('');
     setPlanLanguage(language);
+    setPlanAspect(aspect);
     setDigest('');
     setStatus(null);
     setItems(Array.from({ length: count }, () => ({
@@ -628,7 +648,7 @@ export function StickerPage({
           argsTemplate: config.mcp_image_args,
           prompts: items.map(item => generationPrompt(item)),
           directory: outputDirectory,
-          sizeFor: () => '1:1',
+          sizeFor: () => mcpImageSize(aspect),
           signal: controller.signal,
         });
         producedFiles = result.files.length;
@@ -794,6 +814,7 @@ export function StickerPage({
         batchDirectory = dir + '/imgs/.batch-' + runToken;
         await api.workspace.mkdir({ path: batchDirectory });
         activeBindings = stickerBatchBindings(items, modelId, generationPrompt);
+        const parameters = imageParametersForModel(imageModels.find(model => model.id === modelId), aspect);
         const created = await api.ai.batch.create({
           mode: 'generate',
           source: imageModelSource(imageModels, modelId),
@@ -801,6 +822,7 @@ export function StickerPage({
           prompt: generationPrompt(items[0]),
           items: items.map(item => ({ prompt: generationPrompt(item) })),
           concurrency: 2,
+          ...(Object.keys(parameters).length ? { parameters } : {}),
         });
         setDirectory(dir);
         setBatchBindings(activeBindings);
@@ -900,6 +922,10 @@ export function StickerPage({
   }
 
   async function generateSingle(item: StickerItem, index: number) {
+    if (aspectChanged) {
+      notify('图片比例已修改，请先重新生成整组方案，再单张生成。', 'warning');
+      return;
+    }
     if (languageChanged) {
       notify('主题语言已修改，请先重新生成整组方案，再单张生成。', 'warning');
       return;
@@ -959,7 +985,7 @@ export function StickerPage({
           argsTemplate: config.mcp_image_args,
           prompts: [prompt],
           directory: tempDir,
-          sizeFor: () => '1:1',
+          sizeFor: () => mcpImageSize(aspect),
           signal: controller.signal,
         });
         if (result.files[0]) {
@@ -974,6 +1000,7 @@ export function StickerPage({
           return;
         }
       } else {
+        const parameters = imageParametersForModel(imageModels.find(model => model.id === modelId), aspect);
         const created = await api.ai.batch.create({
           mode: 'generate',
           source: imageModelSource(imageModels, modelId),
@@ -981,6 +1008,7 @@ export function StickerPage({
           prompt,
           items: [{ prompt }],
           concurrency: 1,
+          ...(Object.keys(parameters).length ? { parameters } : {}),
         });
         const started = await api.ai.batch.start({ id: created.id, revision: created.revision, workspacePath: tempDir });
         const value = await waitBatch(started.id, false);
@@ -1029,6 +1057,7 @@ export function StickerPage({
     const planBrief = String(snapshot?.summary ?? planSummary ?? '');
     const planStyle = String(snapshot?.style ?? style ?? '');
     const planMedium = String(snapshot?.medium ?? medium ?? '');
+    const planAspect = normalizeStickerAspect(snapshot?.aspect || aspect);
     const planLanguageValue = normalizeStickerLanguage(snapshot?.language || planLanguage || language);
     const planDigest = String(snapshot?.digest ?? digest ?? '');
     const planItems = (Array.isArray(snapshot?.items) ? snapshot.items : items) as StickerItem[];
@@ -1043,6 +1072,7 @@ export function StickerPage({
       summary: planBrief,
       style: planStyle,
       medium: planMedium,
+      aspect: planAspect,
       language: planLanguageValue,
       digest: planDigest,
       count: planItems.length,
@@ -1059,6 +1089,7 @@ export function StickerPage({
       summary: value.summary,
       style: value.style,
       medium: value.medium,
+      aspect: value.aspect,
       items: planItems,
     });
     await api.workspace.mkdir({ path: dir + '/imgs' }).catch(() => {});
@@ -1121,6 +1152,7 @@ export function StickerPage({
       items,
       filesByItem,
       medium,
+      aspect,
       language,
       config,
       draftsRoot: config.drafts_root || 'drafts',
@@ -1423,6 +1455,11 @@ export function StickerPage({
               {Array.from({ length: 9 }, (_, index) => index + 1).map(value => <option key={value} value={value}>{value} 张</option>)}
             </select>
           </Field>
+          <Field label="图片比例" hint="推荐竖版 3:4；修改后已生成贴图需重做。">
+            <select value={aspect} onChange={event => { clearBatchBinding(); markImagesStale(); setAspect(normalizeStickerAspect(event.target.value)); }} disabled={operationBusy}>
+              {STICKER_ASPECTS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+            </select>
+          </Field>
           <Field label="统一风格"><input value={style} onChange={event => { clearBatchBinding(); markImagesStale(); setStyle(event.target.value); }} disabled={operationBusy} /></Field>
           <Field label="主题语言" hint="统一控制画面内可见文字与逐图配文。">
             <select value={language} onChange={event => { clearBatchBinding(); markImagesStale(); setLanguage(normalizeStickerLanguage(event.target.value)); }} disabled={operationBusy}>
@@ -1464,7 +1501,7 @@ export function StickerPage({
       {items.length ? (
         <section className="panel">
           <div className="section-heading">
-            <div><h2>{title || topic}</h2><p>{items.length} 张 · {style} · {medium} · {language}</p></div>
+            <div><h2>{title || topic}</h2><p>{items.length} 张 · {aspect} · {style} · {medium} · {language}</p></div>
             <div className="toolbar">
               <Button type="button" onClick={() => { clearBatchBinding(); setItems(current => [...current, { id: stickerId(), viewpoint: '', prompt: '', caption: '' }]); }} disabled={items.length >= 9 || operationBusy}>加一张</Button>
               <Button type="button" onClick={() => void copyCaptions()}>复制配文</Button>
@@ -1531,7 +1568,7 @@ export function StickerPage({
                   </div>
                   {file ? (
                     <div className="sticker-item-media">
-                      <StickerPreview path={file} caption={(index + 1) + '. ' + item.caption} />
+                      <StickerPreview path={file} aspect={aspect} caption={(index + 1) + '. ' + item.caption} />
                     </div>
                   ) : null}
                   <footer className="sticker-item-footer">
@@ -1546,7 +1583,7 @@ export function StickerPage({
                       type="button"
                       variant={file ? 'secondary' : 'primary'}
                       busy={itemBusy}
-                      disabled={operationBusy || (imageGenerator === 'model' ? !modelId : (!mcpReady || !config.mcp_image_tool))}
+                      disabled={operationBusy || aspectChanged || (imageGenerator === 'model' ? !modelId : (!mcpReady || !config.mcp_image_tool))}
                       onClick={() => void generateSingle(item, index)}
                     >
                       {file ? '重新生成这张' : '单独生成这张'}
@@ -1573,7 +1610,7 @@ export function StickerPage({
               <Button type="button" variant="danger" onClick={() => void generate('retry')} busy={generating} disabled={operationBusy && !generating}>明确重试失败项</Button>
             ) : null}
             {imageGenerator === 'mcp' && mcpWaiting ? <Button type="button" variant="danger" onClick={() => mcpAbort.current?.abort()}>停止等待</Button> : null}
-            <Button type="button" onClick={() => void persistPlan().catch(error => notify('保存方案失败：' + errorText(error), 'danger'))} disabled={!directory || operationBusy}>仅保存方案</Button>
+            <Button type="button" onClick={() => void persistPlan().catch(error => notify('保存方案失败：' + errorText(error), 'danger'))} disabled={!directory || operationBusy || aspectChanged}>仅保存方案</Button>
             <Button
               type="button"
               variant="primary"
@@ -1658,14 +1695,21 @@ export function StickerPage({
   );
 }
 
-function StickerPreview({ path, caption }: { path: string; caption: string }) {
+function aspectCss(aspect: string) {
+  const match = /^(\d+(?:\.\d+)?):(\d+(?:\.\d+)?)$/.exec(String(aspect || ''));
+  return match ? match[1] + ' / ' + match[2] : '3 / 4';
+}
+
+function StickerPreview({ path, aspect, caption }: { path: string; aspect: string; caption: string }) {
   const [url, setUrl] = useState('');
   useEffect(() => {
     void api.workspace.url({ path }).then(setUrl).catch(() => {});
   }, [path]);
   return (
     <figure>
-      {url ? <img src={url} alt={path} loading="lazy" /> : <span className="image-placeholder" />}
+      {url
+        ? <img src={url} alt={path} loading="lazy" style={{ aspectRatio: aspectCss(aspect) }} />
+        : <span className="image-placeholder" style={{ aspectRatio: aspectCss(aspect) }} />}
       <figcaption>{caption}</figcaption>
     </figure>
   );
