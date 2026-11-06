@@ -16,27 +16,32 @@ import {
 import {
   STICKER_LANGUAGES,
   STICKER_SESSION_PATH,
+  STICKER_TYPES,
   mergeStickerFiles,
+  normalizeStickerPlan,
   normalizeStickerLanguage,
+  parseStickerPlanContent,
   parseStickerSession,
   stickerBatchBindings,
   stickerBatchHasUnknown,
   stickerBatchMatches,
   stickerBatchRetryable,
-  stickerCaptionPrefix,
   stickerDocumentMarkdown,
-  stickerImageItems,
+  stickerGenerationPrompt,
+  stickerItemDuplicateIssues,
+  stickerOutlineMarkdown,
+  stickerPlanBriefIssues,
+  stickerPlanIssues,
   stickerPublicationFingerprintPayload,
   stickerPublishBlocked,
   stickerResetReceipt,
   stickerSessionSnapshot,
-  withStickerLanguage,
 } from '../lib/stickers.mjs';
 import type { ImageModel, McpServer, Toast, WechatAccount } from './types';
 import type { StudioPreferences } from './preferences';
 
 type Notify = (text: string, tone?: Toast['tone']) => void;
-type StickerItem = { id: string; prompt: string; caption: string };
+type StickerItem = { id: string; viewpoint: string; prompt: string; caption: string };
 type StickerBatchBinding = { id: string; prompt: string; modelId: string };
 
 function stickerId() {
@@ -49,6 +54,7 @@ function stickerStateLabel(state: string) {
   if (state === 'unknown') return '结果未知';
   if (state === 'failed' || state === 'save-failed') return '失败';
   if (state === 'canceled') return '已取消';
+  if (state === 'stale') return '方案已改，需重生成';
   return state || '待生成';
 }
 
@@ -74,11 +80,16 @@ export function StickerPage({
   const [style, setStyle] = useState(String(config.custom_sticker_style?.[0] || config.default_sticker_style?.[0] || '统一手绘'));
   const [medium, setMedium] = useState(chooseMedium(config, {}, String(config.topic_direction || '')));
   const [language, setLanguage] = useState(normalizeStickerLanguage(config.sticker_language));
+  const [planLanguage, setPlanLanguage] = useState('');
   const [modelId, setModelId] = useState(preferences.imageModelId || imageModels[0]?.id || '');
   const [items, setItems] = useState<StickerItem[]>([]);
+  const [stickerType, setStickerType] = useState('');
+  const [narrative, setNarrative] = useState('');
+  const [planSummary, setPlanSummary] = useState('');
   const [title, setTitle] = useState('');
   const [digest, setDigest] = useState('');
   const [planning, setPlanning] = useState(false);
+  const [planError, setPlanError] = useState('');
   const [generating, setGenerating] = useState(false);
   const [generatingItemId, setGeneratingItemId] = useState('');
   const [mcpWaiting, setMcpWaiting] = useState(false);
@@ -121,8 +132,22 @@ export function StickerPage({
     && receiptSourceFingerprint
     && receiptSourceFingerprint === fingerprint,
   );
-  const generatedCount = stickerImageItems(items, filesByItem).length;
-  const publishReady = Boolean(title.trim() && items.length && generatedCount === items.length && accountId);
+  const currentImageCount = items.filter(item => {
+    const file = filesByItem[item.id];
+    const state = String(itemStates[item.id]?.state || '');
+    return Boolean(file) && (!state || state === 'succeeded');
+  }).length;
+  const staleCount = items.filter(item => itemStates[item.id]?.state === 'stale').length;
+  const generatedCount = currentImageCount;
+  const languageChanged = Boolean(items.length && planLanguage && planLanguage !== language);
+  const planIssues = stickerPlanIssues(items, {
+    type: stickerType,
+    narrative,
+    summary: planSummary,
+  });
+  if (languageChanged) planIssues.unshift('主题语言已修改，请重新生成整组方案或逐张核对画面文字与配文。');
+  const planReady = Boolean(items.length && !planIssues.length);
+  const publishReady = Boolean(title.trim() && planReady && generatedCount === items.length && accountId);
   const operationBusy = planning || generating || Boolean(generatingItemId) || savingProject || publishBusy || !receiptHydrated;
 
   useEffect(() => () => mcpAbort.current?.abort(), []);
@@ -141,6 +166,10 @@ export function StickerPage({
       setStyle(session.style || style);
       setMedium(session.medium || medium);
       setLanguage(session.language);
+      setPlanLanguage(session.planLanguage || session.language);
+      setStickerType(session.type);
+      setNarrative(session.narrative);
+      setPlanSummary(session.summary);
       setTitle(session.title);
       setDigest(session.digest);
       setFingerprintReady(false);
@@ -181,7 +210,7 @@ export function StickerPage({
       void persistStickerSession().catch(() => {});
     }, 350);
     return () => window.clearTimeout(timer);
-  }, [topic, count, style, medium, language, title, digest, items, filesByItem, itemStates, directory, accountId]);
+  }, [topic, count, style, medium, language, planLanguage, stickerType, narrative, planSummary, title, digest, items, filesByItem, itemStates, directory, accountId]);
 
   useEffect(() => {
     if (preferences.imageModelId && imageModels.some(model => model.id === preferences.imageModelId)) {
@@ -242,14 +271,46 @@ export function StickerPage({
     config.default_author,
     config.need_open_comment,
     config.only_fans_can_comment,
+    medium,
+    style,
+    stickerType,
+    narrative,
+    planSummary,
   ]);
 
   function generationPrompt(item: StickerItem) {
-    return withStickerLanguage(item.prompt, language);
+    const index = items.findIndex(entry => entry.id === item.id);
+    return stickerGenerationPrompt({
+      topic,
+      type: stickerType,
+      narrative,
+      summary: planSummary,
+      style,
+      medium,
+      index: index >= 0 ? index + 1 : 1,
+      count: items.length,
+      language,
+      item,
+    });
   }
 
   function updateItemState(id: string, state: string, error = '', taskId = '') {
     setItemStates(current => ({ ...current, [id]: { state, error, taskId } }));
+  }
+
+  function markImagesStale(ids?: string[]) {
+    if (!items.length) return;
+    setItemStates(current => {
+      const next = { ...current };
+      for (const item of items) {
+        if (ids && !ids.includes(item.id)) continue;
+        if (!filesByItem[item.id]) continue;
+        const state = String(next[item.id]?.state || '');
+        if (state && state !== 'succeeded') continue;
+        next[item.id] = { state: 'stale', error: '', taskId: '' };
+      }
+      return next;
+    });
   }
 
   async function publicationFingerprint() {
@@ -259,6 +320,11 @@ export function StickerPage({
       topic,
       digest,
       language,
+      type: stickerType,
+      narrative,
+      summary: planSummary,
+      medium,
+      style,
       author: config.default_author,
       needOpenComment: config.need_open_comment,
       onlyFansCanComment: config.only_fans_can_comment,
@@ -353,6 +419,10 @@ export function StickerPage({
       style,
       medium,
       language,
+      planLanguage,
+      type: stickerType,
+      narrative,
+      summary: planSummary,
       title,
       digest,
       items,
@@ -370,65 +440,125 @@ export function StickerPage({
     });
   }
 
-  function localPlan() {
-    return {
-      title: [...String(topic || '今日分享')].slice(0, 64).join(''),
-      style,
-      images: Array.from({ length: count }, (_, index) => ({
-        id: stickerId(),
-        prompt: '统一风格贴图第 ' + (index + 1) + ' 张。主题：' + (topic || '今日分享') + '。风格：' + style + '。媒介：' + medium + '。画面只承载一个清楚的小观点，不要 emoji。',
-        caption: stickerCaptionPrefix(language, index + 1) + (topic || '今日分享'),
-      })),
-    };
-  }
-
   async function plan() {
     if (!topic.trim()) {
       notify('请填写贴图主题。', 'warning');
       return;
     }
     setPlanning(true);
+    setPlanError('');
     setSessionRestored(false);
-    setFingerprintReady(false);
+    const prompt = buildStickerPrompt(config, {
+      topic,
+      count,
+      language,
+      style,
+      medium,
+      direction: config.topic_direction,
+    });
+    let lastError: unknown = null;
     try {
-      const prompt = buildStickerPrompt(config, { topic, count, language });
-      const result = await api.ai.complete({
-        model: typeof config.writing_model === 'object' ? config.writing_model?.id : undefined,
-        messages: [{ role: 'system', content: prompt.system }, { role: 'user', content: prompt.user }],
-        temperature: 0.7,
-        maxTokens: 3000,
-        responseFormat: { type: 'json_object' },
-      });
-      const raw = String(result.content || '').replace(/^```(?:json)?|```$/g, '').trim();
-      const value = JSON.parse(raw);
-      if (!Array.isArray(value.images) || value.images.length !== count) throw new Error('模型返回的图片数量不一致。');
-      setTitle([...String(value.title || topic)].slice(0, 64).join(''));
-      setItems(value.images.map((item: any) => ({ id: stickerId(), prompt: String(item.prompt || ''), caption: String(item.caption || '') })));
-      setBatch(null);
-      setBatchBindings([]);
-      setBatchWorkspacePath('');
-      setDirectory('');
-      setOutputFiles([]);
-      setFilesByItem({});
-      setItemStates({});
-      setDigest(String(value.images[0]?.caption || '').slice(0, 120));
-      if (result.finishReason === 'length') notify('方案达到输出上限，请缩短主题或减少图片。', 'warning');
-    } catch (error) {
-      const fallback = localPlan();
-      setTitle(fallback.title);
-      setItems(fallback.images);
-      setBatch(null);
-      setBatchBindings([]);
-      setBatchWorkspacePath('');
-      setDirectory('');
-      setOutputFiles([]);
-      setFilesByItem({});
-      setItemStates({});
-      setDigest('');
-      notify('AI 方案生成失败，已使用本地规划，可逐张修改。' + errorText(error), 'warning');
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          const result = await api.ai.complete({
+            model: typeof config.writing_model === 'object' ? config.writing_model?.id : config.writing_model || undefined,
+            messages: [
+              { role: 'system', content: prompt.system },
+              {
+                role: 'user',
+                content: attempt === 0
+                  ? prompt.user
+                  : prompt.user + '\n\n上一次输出未通过校验：' + errorText(lastError)
+                    + '\n请重新输出完整 JSON，并确保 ' + count + ' 张图的方案小结和配文都互不重复。',
+              },
+            ],
+            temperature: 0.7,
+            maxTokens: attempt === 0 ? 6000 : 8000,
+            responseFormat: { type: 'json_object' },
+          });
+          if (result.finishReason === 'length') throw new Error('方案达到输出上限，请减少图片数量后重试。');
+          const value = normalizeStickerPlan(parseStickerPlanContent(result.content), {
+            topic,
+            count,
+            style,
+            medium,
+            language,
+          });
+          const nextItems = value.images.map((item: { viewpoint: string; prompt: string; caption: string }) => ({ id: stickerId(), ...item }));
+          const nextDigest = String(value.summary || nextItems[0]?.caption || '').slice(0, 120);
+          setTitle(value.title);
+          setStickerType(value.type);
+          setNarrative(value.narrative);
+          setPlanSummary(value.summary);
+          setPlanLanguage(value.language);
+          setItems(nextItems);
+          setFingerprintReady(false);
+          setStatus(null);
+          setBatch(null);
+          setBatchBindings([]);
+          setBatchWorkspacePath('');
+          setOutputFiles([]);
+          setFilesByItem({});
+          setItemStates({});
+          setDigest(nextDigest);
+          let planDir = '';
+          try {
+            planDir = await createStickerDirectory(value.title);
+            await persistPlan(planDir, {}, {
+              title: value.title,
+              type: value.type,
+              narrative: value.narrative,
+              summary: value.summary,
+              style: value.style,
+              medium: value.medium,
+              language: value.language,
+              digest: nextDigest,
+              items: nextItems,
+            });
+          } catch (error) {
+            if (!planDir) setDirectory('');
+            notify('整组方案已生成，但方案文件保存失败：' + errorText(error), 'warning');
+          }
+          notify('整组方案已生成，请先核对叙事线和每张的方案小结，再确认批量生成。', 'success');
+          return;
+        } catch (error) {
+          lastError = error;
+        }
+      }
+      const message = errorText(lastError);
+      setPlanError(message);
+      notify(
+        '方案生成失败：' + message + (items.length ? ' 已保留上次方案。' : ' 未生成占位方案，避免整组观点重复。'),
+        'danger',
+      );
     } finally {
       setPlanning(false);
     }
+  }
+
+  function manualPlan() {
+    setPlanError('');
+    setTitle(topic.trim() || '今日分享');
+    setStickerType('知识卡片');
+    setNarrative('');
+    setPlanSummary('');
+    setPlanLanguage(language);
+    setDigest('');
+    setStatus(null);
+    setItems(Array.from({ length: count }, () => ({
+      id: stickerId(),
+      viewpoint: '',
+      prompt: '',
+      caption: '',
+    })));
+    setBatch(null);
+    setBatchBindings([]);
+    setBatchWorkspacePath('');
+    setDirectory('');
+    setOutputFiles([]);
+    setFilesByItem({});
+    setItemStates({});
+    setSessionRestored(false);
   }
 
   function move(index: number, direction: number) {
@@ -464,8 +594,9 @@ export function StickerPage({
       notify(imageGenerator === 'mcp' ? '请先生成方案并完成 MCP 生图配置。' : '请先生成方案并选择图片模型。', 'warning');
       return;
     }
-    if (items.some(item => !item.prompt.trim())) {
-      notify('还有贴图缺少画面提示词，请补齐后再批量生成。', 'warning');
+    const issues = planIssues;
+    if (issues.length) {
+      notify(issues[0], 'warning');
       return;
     }
     if (imageGenerator === 'mcp') {
@@ -483,7 +614,6 @@ export function StickerPage({
       const controller = new AbortController();
       mcpAbort.current = controller;
       let producedFiles = 0;
-      setItemStates({});
       try {
         await api.workspace.mkdir({ path: dir });
         await api.workspace.mkdir({ path: outputDirectory });
@@ -525,10 +655,6 @@ export function StickerPage({
           })),
         };
         setBatch(value);
-        setItemStates(Object.fromEntries(value.items.map((item: any) => {
-          const source = items[Number(String(item.id).replace('mcp-', '')) - 1];
-          return source ? [source.id, { state: item.state, error: item.error || '', taskId: item.taskId || '' }] : null;
-        }).filter(Boolean) as Array<[string, { state: string; error: string; taskId: string }]>));
         setDirectory(dir);
         const hasRecovery = producedFiles > 0 || result.unknowns.length > 0 || Boolean(result.abortedTaskId);
         if (result.fatal && !result.files.length && !hasRecovery) {
@@ -583,6 +709,15 @@ export function StickerPage({
         await persistPlan(dir, mapping);
         setOutputFiles(output);
         setFilesByItem(mapping);
+        setItemStates(Object.fromEntries(items.map((source, index) => {
+          const item: any = value.items[index];
+          const state = item?.state === 'succeeded' && !mapping[source.id] ? 'failed' : item?.state || 'unknown';
+          return [source.id, {
+            state,
+            error: item?.error || '',
+            taskId: item?.taskId || '',
+          }];
+        }) as Array<[string, { state: string; error: string; taskId: string }]>));
         for (const item of items) {
           const previous = filesByItem[item.id];
           const next = mapping[item.id];
@@ -616,7 +751,6 @@ export function StickerPage({
       return;
     }
     setGenerating(true);
-    setItemStates({});
     try {
       let dir = directory;
       let started;
@@ -676,14 +810,6 @@ export function StickerPage({
       }
       setBatch(started);
       const value = await waitBatch(started.id);
-      setItemStates(Object.fromEntries((value.items || []).map((batchItem: any, index: number) => {
-        const binding = activeBindings[index];
-        return binding ? [binding.id, {
-          state: batchItem?.state || 'unknown',
-          error: batchItem?.error || '',
-          taskId: batchItem?.taskId || '',
-        }] : null;
-      }).filter(Boolean) as Array<[string, { state: string; error: string; taskId: string }]>));
       if (value.state !== 'finished') {
         notify(value.state === 'interrupted' ? '贴图生成被中断，请检查状态后明确重试。' : '贴图生成已结束。', 'warning');
         return;
@@ -710,6 +836,19 @@ export function StickerPage({
       await persistPlan(dir, mapping);
       setOutputFiles(output.filter((entry: any) => entry.kind === 'file'));
       setFilesByItem(mapping);
+      const nextStates = Object.fromEntries((value.items || []).map((batchItem: any, index: number) => {
+        const binding = activeBindings[index];
+        if (!binding) return null;
+        const state = batchItem?.state === 'succeeded' && !updates[binding.id]
+          ? 'failed'
+          : batchItem?.state || 'unknown';
+        return [binding.id, {
+          state,
+          error: batchItem?.error || '',
+          taskId: batchItem?.taskId || '',
+        }];
+      }).filter(Boolean) as Array<[string, { state: string; error: string; taskId: string }]>) as Record<string, { state: string; error: string; taskId: string }>;
+      setItemStates(nextStates);
       for (const item of items) {
         const previous = filesByItem[item.id];
         const next = mapping[item.id];
@@ -717,11 +856,14 @@ export function StickerPage({
       }
       const retryable = stickerBatchRetryable(value.items);
       const unknown = stickerBatchHasUnknown(value.items);
-      if (!unknown && !retryable) await api.workspace.remove({ path: batchDirectory, recursive: true }).catch(() => {});
+      const degraded = Object.values(nextStates).filter(state => state.state && state.state !== 'succeeded').length;
+      if (!unknown && !retryable && !degraded) await api.workspace.remove({ path: batchDirectory, recursive: true }).catch(() => {});
       await onChanged().catch(() => {});
       const missing = items.length - Object.keys(mapping).length;
-      if (missing > 0 || retryable || unknown) {
-        notify('贴图方案已保存，仍有 ' + Math.max(0, missing) + ' 张缺失' + (unknown ? '，其中包含结果未知项' : '') + '。请明确选择重试或重新生成。', 'warning');
+      if (missing > 0 || retryable || unknown || degraded) {
+        notify('贴图方案已保存，仍有 ' + Math.max(0, missing) + ' 张缺失'
+          + (degraded ? '，其中 ' + degraded + ' 张未产出本次新文件或被标记失败' : '')
+          + (unknown ? '，其中包含结果未知项' : '') + '。请明确选择重试或重新生成。', 'warning');
       } else {
         notify('整组贴图已生成并保存，可继续创建公众号草稿。微信原生图片消息仍需在公众号后台手动发送。', 'success');
       }
@@ -732,16 +874,20 @@ export function StickerPage({
     }
   }
 
-  async function ensureStickerDirectory() {
-    if (directory) return directory;
+  async function createStickerDirectory(planTitle = title || topic) {
     const date = new Date();
     const stamp = date.getFullYear() + String(date.getMonth() + 1).padStart(2, '0') + String(date.getDate()).padStart(2, '0');
-    const slug = (title || topic).replace(/[^\u3400-\u9fffA-Za-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 28) || 'stickers';
+    const slug = String(planTitle || '').replace(/[^\u3400-\u9fffA-Za-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 28) || 'stickers';
     const dir = 'posts/stickers/' + stamp + '-' + slug + '-' + mcpBatchToken();
     await api.workspace.mkdir({ path: dir });
     await api.workspace.mkdir({ path: dir + '/imgs' });
     setDirectory(dir);
     return dir;
+  }
+
+  async function ensureStickerDirectory() {
+    if (directory) return directory;
+    return createStickerDirectory();
   }
 
   async function syncOutputs(dir: string, mapping: Record<string, string>) {
@@ -751,8 +897,34 @@ export function StickerPage({
   }
 
   async function generateSingle(item: StickerItem, index: number) {
+    if (languageChanged) {
+      notify('主题语言已修改，请先重新生成整组方案，再单张生成。', 'warning');
+      return;
+    }
+    const planBriefIssues = stickerPlanBriefIssues({
+      type: stickerType,
+      narrative,
+      summary: planSummary,
+    });
+    if (planBriefIssues.length) {
+      notify(planBriefIssues[0], 'warning');
+      return;
+    }
+    const duplicateIssues = stickerItemDuplicateIssues(item, index, items);
+    if (duplicateIssues.length) {
+      notify(duplicateIssues[0], 'warning');
+      return;
+    }
+    if (!item.viewpoint.trim()) {
+      notify('第 ' + (index + 1) + ' 张还没有方案小结。', 'warning');
+      return;
+    }
     if (!item.prompt.trim()) {
       notify('第 ' + (index + 1) + ' 张还没有画面提示词。', 'warning');
+      return;
+    }
+    if (!item.caption.trim()) {
+      notify('第 ' + (index + 1) + ' 张还没有配文。', 'warning');
       return;
     }
     if (imageGenerator === 'mcp' && (!config.mcp_image_server || !config.mcp_image_tool || !mcpReady)) {
@@ -842,26 +1014,53 @@ export function StickerPage({
     }
   }
 
-  async function persistPlan(dir = directory, mapping = filesByItem) {
+  async function persistPlan(
+    dir = directory,
+    mapping = filesByItem,
+    snapshot: Record<string, any> | null = null,
+  ) {
     if (!dir) return;
+    const planTitle = String(snapshot?.title ?? title ?? topic ?? '');
+    const planType = String(snapshot?.type ?? stickerType ?? '');
+    const planNarrative = String(snapshot?.narrative ?? narrative ?? '');
+    const planBrief = String(snapshot?.summary ?? planSummary ?? '');
+    const planStyle = String(snapshot?.style ?? style ?? '');
+    const planMedium = String(snapshot?.medium ?? medium ?? '');
+    const planLanguageValue = normalizeStickerLanguage(snapshot?.language || planLanguage || language);
+    const planDigest = String(snapshot?.digest ?? digest ?? '');
+    const planItems = (Array.isArray(snapshot?.items) ? snapshot.items : items) as StickerItem[];
     const relative = Object.fromEntries(Object.entries(mapping).map(([id, path]) => [
       id,
       path ? path.slice(dir.length + 1) : '',
     ]));
     const value = {
-      title: title || topic,
-      style,
-      medium,
-      language,
-      digest,
-      count: items.length,
-      images: items.map(item => ({
+      title: planTitle || topic,
+      type: planType,
+      narrative: planNarrative,
+      summary: planBrief,
+      style: planStyle,
+      medium: planMedium,
+      language: planLanguageValue,
+      digest: planDigest,
+      count: planItems.length,
+      images: planItems.map(item => ({
         ...item,
         file: relative[item.id] || '',
       })),
     };
     await api.workspace.writeText({ path: dir + '/plan.json', text: JSON.stringify(value, null, 2), overwrite: true });
-    const markdown = stickerDocumentMarkdown({ title: value.title, digest, items, filesByItem: relative });
+    const outline = stickerOutlineMarkdown({
+      title: value.title,
+      type: value.type,
+      narrative: value.narrative,
+      summary: value.summary,
+      style: value.style,
+      medium: value.medium,
+      items: planItems,
+    });
+    await api.workspace.mkdir({ path: dir + '/imgs' }).catch(() => {});
+    await api.workspace.writeText({ path: dir + '/imgs/outline.md', text: outline, overwrite: true });
+    const markdown = stickerDocumentMarkdown({ title: value.title, digest: value.digest, items: planItems, filesByItem: relative });
     await api.workspace.writeText({ path: dir + '/贴图方案.md', text: markdown, overwrite: true });
     const html = renderMarkdownDocument(markdown);
     await api.workspace.writeText({ path: dir + '/article.html', text: html, overwrite: true });
@@ -959,6 +1158,10 @@ export function StickerPage({
       notify('正在核对当前贴图方案，请稍候再创建草稿。', 'warning');
       return;
     }
+    if (planIssues.length) {
+      notify(planIssues[0], 'warning');
+      return;
+    }
     if (mediaId && draftMatches) {
       notify('当前贴图方案已有公众号草稿，无需重复创建。', 'warning');
       return;
@@ -1049,6 +1252,14 @@ export function StickerPage({
     }
     if (!mediaId) {
       notify('请先创建并核对公众号草稿。', 'warning');
+      return;
+    }
+    if (planIssues.length) {
+      notify(planIssues[0], 'warning');
+      return;
+    }
+    if (generatedCount !== items.length) {
+      notify('还有贴图未按当前方案成功生成，请补齐后再发布。', 'warning');
       return;
     }
     if (publishMethod !== 'published') {
@@ -1150,13 +1361,16 @@ export function StickerPage({
   }
 
   async function saveToArticleProject() {
-    const images = stickerImageItems(items, filesByItem);
-    if (!images.length) {
+    if (planIssues.length) {
+      notify(planIssues[0], 'warning');
+      return;
+    }
+    if (!generatedCount) {
       notify('请至少生成一张贴图，再保存为文章项目。', 'warning');
       return;
     }
-    if (images.length !== items.length) {
-      notify('还有贴图未生成，请补齐后再保存为文章项目。', 'warning');
+    if (generatedCount !== items.length) {
+      notify('还有贴图未按当前方案成功生成，请补齐后再保存为文章项目。', 'warning');
       return;
     }
     setSavingProject(true);
@@ -1189,27 +1403,27 @@ export function StickerPage({
       <header className="page-header">
         <div>
           <h1>贴图工作流</h1>
-          <p>1–9 张统一风格、主题语言与媒介；可单张生成或重做，完成后可直接创建公众号草稿并发布常规图文。</p>
+          <p>先规划整组方案与逐图观点，再按方案小结生成 1–9 张统一风格的贴图；完成后可直接创建公众号草稿并发布常规图文。</p>
         </div>
         <Badge tone="success">草稿 / 发布已接入</Badge>
       </header>
       {sessionRestored ? <div className="notice info">已恢复上次贴图方案；若上次草稿状态未决，请先核对后台再继续。</div> : null}
       <section className="panel">
         <div className="form-grid form-grid-3">
-          <Field label="主题"><input value={topic} onChange={event => { clearBatchBinding(); setTopic(event.target.value); }} placeholder="今天想讲清什么？" disabled={operationBusy} /></Field>
+          <Field label="主题"><input value={topic} onChange={event => { clearBatchBinding(); markImagesStale(); setTopic(event.target.value); }} placeholder="今天想讲清什么？" disabled={operationBusy} /></Field>
           <Field label="图片数量">
             <select value={count} onChange={event => setCount(Number(event.target.value))} disabled={operationBusy}>
               {Array.from({ length: 9 }, (_, index) => index + 1).map(value => <option key={value} value={value}>{value} 张</option>)}
             </select>
           </Field>
-          <Field label="统一风格"><input value={style} onChange={event => { clearBatchBinding(); setStyle(event.target.value); }} disabled={operationBusy} /></Field>
+          <Field label="统一风格"><input value={style} onChange={event => { clearBatchBinding(); markImagesStale(); setStyle(event.target.value); }} disabled={operationBusy} /></Field>
           <Field label="主题语言" hint="统一控制画面内可见文字与逐图配文。">
-            <select value={language} onChange={event => { clearBatchBinding(); setLanguage(normalizeStickerLanguage(event.target.value)); }} disabled={operationBusy}>
+            <select value={language} onChange={event => { clearBatchBinding(); markImagesStale(); setLanguage(normalizeStickerLanguage(event.target.value)); }} disabled={operationBusy}>
               {STICKER_LANGUAGES.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
             </select>
           </Field>
           <Field label="统一媒介">
-            <select value={medium} onChange={event => { clearBatchBinding(); setMedium(event.target.value); }} disabled={operationBusy}>
+            <select value={medium} onChange={event => { clearBatchBinding(); markImagesStale(); setMedium(event.target.value); }} disabled={operationBusy}>
               {IMAGE_MEDIA.map(value => <option key={value}>{value}</option>)}
             </select>
           </Field>
@@ -1226,8 +1440,16 @@ export function StickerPage({
         )}
         </div>
         <div className="toolbar toolbar-end">
-          <Button type="button" variant="primary" onClick={() => void plan()} busy={planning} disabled={operationBusy && !planning}>生成方案与配文</Button>
+          {!items.length || planError ? (
+            <Button type="button" onClick={manualPlan} disabled={operationBusy}>手动新建空白方案</Button>
+          ) : null}
+          <Button type="button" variant="primary" onClick={() => void plan()} busy={planning} disabled={operationBusy && !planning}>生成整组方案与配文</Button>
         </div>
+        {planError ? (
+          <div className="notice danger">
+            方案生成失败：{planError}。{items.length ? '已保留上次方案，可继续修改。' : '没有生成占位方案，避免整组观点重复。请调整主题后重试。'}
+          </div>
+        ) : null}
         {imageGenerator === 'mcp' && !mcpReady ? <div className="notice warning">配置中的 MCP 服务当前不可用，请到配置中心重新选择并确认连接状态。</div> : null}
         {imageGenerator === 'mcp' ? <div className="notice info">整组贴图将通过 MCP 工具生成。首次调用会请求你单独授权该工具；工具可能产生费用。</div> : null}
       </section>
@@ -1237,9 +1459,35 @@ export function StickerPage({
           <div className="section-heading">
             <div><h2>{title || topic}</h2><p>{items.length} 张 · {style} · {medium} · {language}</p></div>
             <div className="toolbar">
-              <Button type="button" onClick={() => { clearBatchBinding(); setItems(current => [...current, { id: stickerId(), prompt: '', caption: '' }]); }} disabled={items.length >= 9 || operationBusy}>加一张</Button>
+              <Button type="button" onClick={() => { clearBatchBinding(); setItems(current => [...current, { id: stickerId(), viewpoint: '', prompt: '', caption: '' }]); }} disabled={items.length >= 9 || operationBusy}>加一张</Button>
               <Button type="button" onClick={() => void copyCaptions()}>复制配文</Button>
             </div>
+          </div>
+          <div className="sticker-plan-brief">
+            <div className="section-heading">
+              <div>
+                <h3>整组方案</h3>
+                <p>先核对叙事线和每张观点；生成图片时会把这部分一起交给模型。</p>
+              </div>
+              <Badge tone={planIssues.length ? 'warning' : 'success'}>{planIssues.length ? '待修正' : '方案可生成'}</Badge>
+            </div>
+            <div className="form-grid form-grid-3">
+              <Field label="贴图类型">
+                <input list="sticker-type-options" value={stickerType} onChange={event => { clearBatchBinding(); markImagesStale(); setStickerType(event.target.value); }} placeholder="知识卡片 / 场景故事 / …" disabled={operationBusy} />
+                <datalist id="sticker-type-options">
+                  {STICKER_TYPES.map(value => <option key={value} value={value} />)}
+                </datalist>
+              </Field>
+              <Field label="叙事线">
+                <input value={narrative} onChange={event => { clearBatchBinding(); markImagesStale(); setNarrative(event.target.value); }} placeholder="知识点递进 / 并列展示 / 对比 / …" disabled={operationBusy} />
+              </Field>
+              <Field label="统一形态" hint="全组只用一个形态，避免风格漂移。">
+                <div className="static-field">{style} · {medium}</div>
+              </Field>
+            </div>
+            <Field label="整组主旨" hint="这张方案总起句会作为生图上下文，也可作为草稿摘要。">
+              <textarea className="lines-input" value={planSummary} onChange={event => { clearBatchBinding(); markImagesStale(); setPlanSummary(event.target.value); }} rows={2} maxLength={200} disabled={operationBusy} />
+            </Field>
           </div>
           <div className="sticker-plan">
             {items.map((item, index) => {
@@ -1252,7 +1500,7 @@ export function StickerPage({
                     <div className="sticker-item-title">
                       <strong>第 {index + 1} 张</strong>
                       {itemState ? (
-                        <Badge tone={itemState.state === 'succeeded' ? 'success' : ['failed', 'unknown'].includes(itemState.state) ? 'danger' : 'neutral'}>
+                        <Badge tone={itemState.state === 'succeeded' ? 'success' : ['failed', 'unknown'].includes(itemState.state) ? 'danger' : itemState.state === 'stale' ? 'warning' : 'neutral'}>
                           {stickerStateLabel(itemState.state)}
                         </Badge>
                       ) : null}
@@ -1264,10 +1512,13 @@ export function StickerPage({
                     </div>
                   </header>
                   <div className="sticker-item-content">
-                    <Field label="画面提示词" hint={'统一主题语言：' + language}>
-                      <textarea value={item.prompt} onChange={event => { clearBatchBinding(); setItems(current => current.map((entry, itemIndex) => itemIndex === index ? { ...entry, prompt: event.target.value } : entry)); }} rows={5} disabled={operationBusy} />
+                    <Field label="方案小结" hint="这张只讲一个观点；批量生成前会检查整组是否重复。">
+                      <textarea value={item.viewpoint} onChange={event => { clearBatchBinding(); markImagesStale([item.id]); setItems(current => current.map((entry, itemIndex) => itemIndex === index ? { ...entry, viewpoint: event.target.value } : entry)); }} rows={3} disabled={operationBusy} />
                     </Field>
-                    <Field label="配文">
+                    <Field label="画面提示词" hint={'由方案小结展开 · 统一主题语言：' + language}>
+                      <textarea value={item.prompt} onChange={event => { clearBatchBinding(); markImagesStale([item.id]); setItems(current => current.map((entry, itemIndex) => itemIndex === index ? { ...entry, prompt: event.target.value } : entry)); }} rows={5} disabled={operationBusy} />
+                    </Field>
+                    <Field label="配文" hint="补充画面之外的判断或信息，不要复述画面。">
                       <textarea value={item.caption} onChange={event => setItems(current => current.map((entry, itemIndex) => itemIndex === index ? { ...entry, caption: event.target.value } : entry))} rows={3} disabled={operationBusy} />
                     </Field>
                   </div>
@@ -1280,6 +1531,8 @@ export function StickerPage({
                     <small>
                       {itemState?.error
                         ? itemState.error + (itemState.taskId ? ' · 任务 ID：' + itemState.taskId : '')
+                        : itemState?.state === 'stale'
+                          ? '方案已修改，需重新生成这张'
                         : file ? '已写入方案，可单独重做' : '尚未生成'}
                     </small>
                     <Button
@@ -1302,18 +1555,24 @@ export function StickerPage({
           {imageGenerator === 'mcp' && stickerBatchRetryable(batch?.items) ? (
             <div className="notice warning">失败项可在对应卡片单独重试；“重新生成整组”仍会再次调用已成功项并可能重复计费。</div>
           ) : null}
+          {planIssues.length ? (
+            <div className="notice warning">{planIssues[0]} 请先修正整组方案，再确认生成。</div>
+          ) : null}
+          {staleCount ? (
+            <div className="notice warning">有 {staleCount} 张贴图的方案已修改，需重新生成后再创建草稿或发布。</div>
+          ) : null}
           <div className="toolbar toolbar-end">
             {imageGenerator === 'model' && stickerBatchRetryable(batch?.items) ? (
               <Button type="button" variant="danger" onClick={() => void generate('retry')} busy={generating} disabled={operationBusy && !generating}>明确重试失败项</Button>
             ) : null}
             {imageGenerator === 'mcp' && mcpWaiting ? <Button type="button" variant="danger" onClick={() => mcpAbort.current?.abort()}>停止等待</Button> : null}
-            <Button type="button" onClick={() => void persistPlan()} disabled={!directory || operationBusy}>仅保存方案</Button>
+            <Button type="button" onClick={() => void persistPlan().catch(error => notify('保存方案失败：' + errorText(error), 'danger'))} disabled={!directory || operationBusy}>仅保存方案</Button>
             <Button
               type="button"
               variant="primary"
               onClick={() => void generate('new')}
               busy={generating}
-              disabled={operationBusy || (imageGenerator === 'model' ? !modelId : (!mcpReady || !config.mcp_image_tool))}
+              disabled={operationBusy || planIssues.length > 0 || (imageGenerator === 'model' ? !modelId : (!mcpReady || !config.mcp_image_tool))}
             >
               {batch ? (imageGenerator === 'mcp' ? '重新生成整组（会再次调用成功项）' : '重新生成整组') : '确认方案并批量生成'}
             </Button>
@@ -1327,8 +1586,8 @@ export function StickerPage({
               <h2>草稿与发布</h2>
               <p>把整组贴图整理为常规图文，创建公众号草稿后可核对并提交发布。微信原生“图片消息”仍需在公众号后台手动发送。</p>
             </div>
-            <Badge tone={publishReady ? 'success' : generatedCount ? 'warning' : 'neutral'}>
-              {publishReady ? '可创建草稿' : generatedCount + '/' + items.length + ' 张已完成'}
+            <Badge tone={publishReady ? 'success' : planIssues.length || generatedCount ? 'warning' : 'neutral'}>
+              {publishReady ? '可创建草稿' : planIssues.length ? '方案待修正' : generatedCount + '/' + items.length + ' 张已完成'}
             </Badge>
           </div>
           <div className="form-grid">
@@ -1345,7 +1604,7 @@ export function StickerPage({
             <Field label="草稿标题">
               <input value={title} onChange={event => setTitle(event.target.value)} placeholder="公众号草稿标题" maxLength={64} disabled={operationBusy} />
             </Field>
-            <Field label="摘要" hint="最多 120 字，使用生成的首张配文作为默认摘要。">
+            <Field label="摘要" hint="最多 120 字，默认使用整组方案主旨。">
               <textarea className="lines-input" value={digest} onChange={event => setDigest(event.target.value)} rows={3} maxLength={120} disabled={operationBusy} />
             </Field>
           </div>
@@ -1372,7 +1631,7 @@ export function StickerPage({
           ) : null}
           <div className="notice info">“保存到文章项目”会在 drafts/ 下创建一份可编辑副本，并复制全部贴图；原贴图方案仍保留在 posts/stickers/。</div>
           <div className="publish-actions">
-            <Button type="button" onClick={() => void saveToArticleProject()} busy={savingProject} disabled={!items.length || generatedCount !== items.length || operationBusy}>
+            <Button type="button" onClick={() => void saveToArticleProject()} busy={savingProject} disabled={!items.length || planIssues.length > 0 || generatedCount !== items.length || operationBusy}>
               保存到文章项目
             </Button>
             <Button type="button" variant="primary" onClick={() => void createDraft()} busy={publishBusy} disabled={!publishReady || !accountId || draftBlocked || !draftEnabled || !fingerprintReady || operationBusy || Boolean(mediaId && draftMatches)}>

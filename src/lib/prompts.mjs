@@ -150,18 +150,46 @@ export function buildImagePrompt(plan, item = {}) {
 export function buildStickerPrompt(config = {}, options = {}) {
   const count = Math.max(1, Math.min(9, Number(options.count) || config.multi_image_count || 6));
   const language = normalizeStickerLanguage(options.language || config.sticker_language);
+  const style = String(options.style || config.custom_sticker_style?.[0] || config.default_sticker_style?.[0] || '统一手绘').trim();
+  const medium = String(options.medium || '').trim();
+  const direction = String(options.direction || config.topic_direction || '').trim();
+  const context = configContext(config, {});
   return {
     system: [
-      '你是公众号贴图策划。先给出整组图方案，再逐图配文。',
-      '一组图必须统一风格与媒介，但每张内容不同、顺序有叙事关系。',
-      '整组统一主题语言：' + language + '。' + stickerLanguageInstruction(language),
-      language === '无文字'
-        ? '画面提示词必须写清主体、场景、动作、构图和光线，但不得要求任何文字、字母或数字标签；避免通用模板。'
-        : '画面提示词必须写清主体、场景、动作、构图、光线和可见文字；避免通用模板。',
-      '输出 JSON：{"title":"...","style":"...","images":[{"prompt":"...","caption":"..."}]}',
-      '图片数量固定为 ' + count + '，不要输出 Markdown 代码围栏。',
-    ].join('\n'),
-    user: '主题：' + String(options.topic || '') + '\n内容方向：' + String(config.topic_direction || '') + '\n统一主题语言：' + language + '\n请给整组方案与逐图配文。',
+      '你是资深公众号贴图策划与视觉编辑，按“先方案、后生图”的顺序工作。',
+      '',
+      '## 先定整组方案',
+      '- 从场景故事 / 知识卡片 / 产品展示 / 节日祝福 / 投票互动中选定一个贴图类型。',
+      '- 从场景递进 / 知识点递进 / 并列展示 / 对比 / 悬念揭晓中选定一条叙事线。',
+      '- 全组只用一个视觉形态，但每张必须承载不同观点；观点之间要有递进、并列或对比关系。',
+      '- 第 1 张负责封面或总起，最后一张负责收束或行动。',
+      '',
+      '## 每张图的硬性要求',
+      '- viewpoint 是这张图的方案小结：一句独立、具体、可复述的观点，不能所有张都等于主题名。',
+      '- caption 是配文：补充画面之外的判断、信息或行动，不能复述画面，不能所有张相同。',
+      '- prompt 是画面提示词：必须写出这张独有的主体、场景、动作、构图、光线和可见文字。',
+      '- 禁止使用“统一风格贴图第 N 张”“画面只承载一个清楚的小观点”这类模板句；每张都要有具体内容。',
+      '- 如果选择“无文字”，prompt 不得要求任何文字、字母或数字标签；caption 仍使用简体中文。',
+      '',
+      '## 输出格式',
+      '只输出一个 JSON 对象，不要 Markdown 围栏或解释：',
+      '{"title":"≤64字标题","type":"贴图类型","narrative":"叙事线说明","summary":"整组主旨，40–100字","images":[{"viewpoint":"本张观点","prompt":"画面提示词","caption":"配文"}]}',
+      'images 固定 ' + count + ' 项，顺序就是发布顺序。',
+      '',
+      '## 本篇统一约束',
+      '- 统一风格：' + style,
+      medium ? '- 统一媒介：' + medium : '',
+      '- 整组统一主题语言：' + language + '。' + stickerLanguageInstruction(language),
+      context ? '\n## 账号配置\n' + context : '',
+    ].filter(Boolean).join('\n'),
+    user: [
+      '主题：' + String(options.topic || ''),
+      direction ? '内容方向：' + direction : '',
+      '统一风格：' + style,
+      medium ? '统一媒介：' + medium : '',
+      '统一主题语言：' + language,
+      '请先给出整组方案，再给 ' + count + ' 张互不重复的逐图观点、画面提示词和配文。',
+    ].filter(Boolean).join('\n'),
   };
 }
 
