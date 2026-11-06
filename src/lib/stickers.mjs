@@ -8,6 +8,7 @@ export const STICKER_LANGUAGES = [
 
 export const DEFAULT_STICKER_LANGUAGE = '简体中文';
 export const STICKER_SESSION_PATH = 'posts/stickers/.sticker-session.json';
+export const STICKER_TYPES = ['场景故事', '知识卡片', '产品展示', '节日祝福', '投票互动'];
 
 export function normalizeStickerLanguage(value) {
   const language = String(value || '').trim();
@@ -35,6 +36,239 @@ export function withStickerLanguage(prompt, language) {
   const text = String(prompt || '').trim();
   const instruction = stickerLanguageInstruction(language);
   return text ? text + '\n\n统一主题语言（必须遵守）：' + instruction : instruction;
+}
+
+export function stickerTextKey(value) {
+  return String(value || '')
+    .replace(/^第\s*\d+\s*[张張]\s*(?:配文)?\s*[:：]\s*/u, '')
+    .replace(/^image\s*\d+\s*caption\s*:\s*/iu, '')
+    .replace(/^第\s*\d+\s*[张張]\s*\/\s*image\s*\d+\s*caption\s*:\s*/iu, '')
+    .replace(/[\s\p{P}\p{S}]/gu, '')
+    .toLocaleLowerCase();
+}
+
+export function stickerItemDuplicateIssues(item, index, items = []) {
+  const list = Array.isArray(items) ? items : [];
+  const issues = [];
+  const label = '第 ' + (index + 1) + ' 张';
+  const viewpoint = stickerTextKey(item?.viewpoint);
+  const prompt = stickerTextKey(item?.prompt);
+  const caption = stickerTextKey(item?.caption);
+  list.forEach((other, otherIndex) => {
+    if (otherIndex === index) return;
+    if (viewpoint && stickerTextKey(other?.viewpoint) === viewpoint) {
+      issues.push(label + '与第 ' + (otherIndex + 1) + ' 张的方案小结重复，请改成各自独立的观点。');
+    }
+    if (prompt && stickerTextKey(other?.prompt) === prompt) {
+      issues.push(label + '与第 ' + (otherIndex + 1) + ' 张的画面提示词重复，请改成各自的画面。');
+    }
+    if (caption && stickerTextKey(other?.caption) === caption) {
+      issues.push(label + '与第 ' + (otherIndex + 1) + ' 张的配文重复，请补充这张独有的信息。');
+    }
+  });
+  return [...new Set(issues)];
+}
+
+export function stickerPlanBriefIssues(plan = {}) {
+  const issues = [];
+  const planType = String(plan?.type || '').trim();
+  if (!planType) {
+    issues.push('请先选择贴图类型。');
+  } else if (!STICKER_TYPES.includes(planType)) {
+    issues.push('贴图类型需从「' + STICKER_TYPES.join(' / ') + '」中选择。');
+  }
+  if (!String(plan?.narrative || '').trim()) issues.push('请先写清整组叙事线。');
+  if (!String(plan?.summary || '').trim()) issues.push('请先写清整组主旨。');
+  return issues;
+}
+
+export function stickerPlanIssues(items = [], plan = {}) {
+  const list = Array.isArray(items) ? items : [];
+  const issues = stickerPlanBriefIssues(plan);
+  if (!list.length) return ['还没有贴图方案，请先生成或手动新建方案。'];
+  const viewpoints = new Map();
+  const captions = new Map();
+  const prompts = new Map();
+  list.forEach((item, index) => {
+    const label = '第 ' + (index + 1) + ' 张';
+    const viewpoint = stickerTextKey(item?.viewpoint);
+    const caption = stickerTextKey(item?.caption);
+    const prompt = stickerTextKey(item?.prompt);
+    if (!String(item?.viewpoint || '').trim()) {
+      issues.push(label + '缺少方案小结，请写清这张只讲哪一个观点。');
+    } else if (viewpoints.has(viewpoint)) {
+      issues.push(label + '与第 ' + viewpoints.get(viewpoint) + ' 张的方案小结重复，请改成各自独立的观点。');
+    } else {
+      viewpoints.set(viewpoint, index + 1);
+    }
+    if (!String(item?.prompt || '').trim()) {
+      issues.push(label + '缺少画面提示词。');
+    } else if (prompts.has(prompt)) {
+      issues.push(label + '与第 ' + prompts.get(prompt) + ' 张的画面提示词重复，请改成各自的画面。');
+    } else {
+      prompts.set(prompt, index + 1);
+    }
+    if (!String(item?.caption || '').trim()) {
+      issues.push(label + '缺少配文，请补充画面之外的信息。');
+    } else if (captions.has(caption)) {
+      issues.push(label + '与第 ' + captions.get(caption) + ' 张的配文重复，请补充这张独有的信息。');
+    } else {
+      captions.set(caption, index + 1);
+    }
+  });
+  return issues;
+}
+
+function trimmedText(value, fallback = '') {
+  const text = String(value ?? '').trim();
+  return text || fallback;
+}
+
+/**
+ * Normalize an AI sticker plan into the shape used by the workbench.
+ * The normalizer is deliberately strict about uniqueness: an identical
+ * viewpoint or caption across the set is the failure mode this plan prevents.
+ * @param {any} value
+ * @param {{ topic?: string, count?: number, style?: string, medium?: string, language?: string }} [options]
+ * @returns {{
+ *   title: string, type: string, narrative: string, summary: string,
+ *   style: string, medium: string, language: string,
+ *   images: Array<{ viewpoint: string, prompt: string, caption: string }>,
+ * }}
+ */
+export function normalizeStickerPlan(value, {
+  topic = '',
+  count = 6,
+  style = '',
+  medium = '',
+  language = DEFAULT_STICKER_LANGUAGE,
+} = {}) {
+  const expected = Math.min(9, Math.max(1, Number(count) || 6));
+  const rawImages = Array.isArray(value?.images) ? value.images : null;
+  if (!rawImages) throw new Error('模型没有返回 images 数组。');
+  if (rawImages.length < expected) {
+    throw new Error('模型只返回 ' + rawImages.length + ' 张方案，少于要求的 ' + expected + ' 张。');
+  }
+  const images = rawImages.slice(0, expected).map(item => ({
+    viewpoint: trimmedText(item?.viewpoint),
+    prompt: trimmedText(item?.prompt),
+    caption: trimmedText(item?.caption),
+  }));
+  const planType = trimmedText(value?.type);
+  const planNarrative = trimmedText(value?.narrative);
+  const planSummary = trimmedText(value?.summary).slice(0, 200);
+  const issues = stickerPlanIssues(images, {
+    type: planType,
+    narrative: planNarrative,
+    summary: planSummary,
+  });
+  if (issues.length) throw new Error(issues[0]);
+  return {
+    title: [...trimmedText(value?.title, topic || '今日分享')].slice(0, 64).join(''),
+    type: planType,
+    narrative: planNarrative,
+    summary: planSummary,
+    style: trimmedText(style, trimmedText(value?.style, '统一手绘')),
+    medium: trimmedText(medium, trimmedText(value?.medium)),
+    language: normalizeStickerLanguage(language || value?.language),
+    images,
+  };
+}
+
+export function parseStickerPlanContent(content) {
+  const text = String(content || '').trim()
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
+  if (!text) throw new Error('模型返回了空方案。');
+  try {
+    return JSON.parse(text);
+  } catch {
+    const start = text.indexOf('{');
+    const end = text.lastIndexOf('}');
+    if (start >= 0 && end > start) {
+      try {
+        return JSON.parse(text.slice(start, end + 1));
+      } catch {
+        // Fall through to the actionable error below.
+      }
+    }
+    throw new Error('模型返回的方案不是有效 JSON，请重试。');
+  }
+}
+
+export function stickerGenerationPrompt({
+  topic = '',
+  type = '',
+  narrative = '',
+  summary = '',
+  style = '',
+  medium = '',
+  index = 1,
+  count = 1,
+  language = DEFAULT_STICKER_LANGUAGE,
+  item = {},
+} = {}) {
+  const lines = [
+    '整组贴图主题：' + (String(topic || '').trim() || '今日分享'),
+    type ? '贴图类型：' + String(type).trim() : '',
+    narrative ? '整组叙事线：' + String(narrative).trim() : '',
+    summary ? '整组主旨：' + String(summary).trim() : '',
+    '本张位置：第 ' + Math.max(1, Number(index) || 1) + ' / ' + Math.max(1, Number(count) || 1) + ' 张。',
+    item?.viewpoint ? '本张方案小结（只讲这个观点）：' + String(item.viewpoint).trim() : '',
+    style ? '统一风格：' + String(style).trim() : '',
+    medium ? '统一媒介：' + String(medium).trim() : '',
+    item?.prompt ? '画面提示词：' + String(item.prompt).trim() : '',
+  ].filter(Boolean);
+  return withStickerLanguage(lines.join('\n'), language);
+}
+
+function tableCell(value) {
+  return String(value || '').replace(/\|/g, '\\|').replace(/\r?\n/g, ' ').trim();
+}
+
+/**
+ * @param {{
+ *   title?: string, type?: string, narrative?: string, summary?: string,
+ *   style?: string, medium?: string,
+ *   items?: Array<{ viewpoint?: string, prompt?: string, caption?: string }>,
+ * }} [plan]
+ */
+export function stickerOutlineMarkdown({
+  title = '',
+  type = '',
+  narrative = '',
+  summary = '',
+  style = '',
+  medium = '',
+  items = [],
+} = {}) {
+  const heading = String(title || '今日分享').trim() || '今日分享';
+  const list = Array.isArray(items) ? items : [];
+  const lines = [
+    '## 贴图方案：' + heading,
+    '',
+    '**张数**：' + list.length + ' 张（≤ 9）',
+    '**贴图类型**：' + (String(type || '').trim() || '未定'),
+    '**叙事线**：' + (String(narrative || '').trim() || '未定'),
+    '**统一形态**：' + ([String(style || '').trim(), String(medium || '').trim()].filter(Boolean).join(' · ') || '未定'),
+  ];
+  if (String(summary || '').trim()) lines.push('**整组主旨**：' + String(summary).trim());
+  lines.push(
+    '',
+    '| 序号 | 画面描述（方案小结） | 配文 | Prompt 要点 |',
+    '|------|----------------------|------|-------------|',
+  );
+  list.forEach((item, index) => {
+    lines.push(
+      '| ' + (index + 1)
+      + ' | ' + (tableCell(item?.viewpoint) || '待补充')
+      + ' | ' + (tableCell(item?.caption) || '待补充')
+      + ' | ' + (tableCell(item?.prompt) || '待补充') + ' |',
+    );
+  });
+  lines.push('', '> 生成前请先确认：每张只讲一个观点，观点之间不重复，配文与画面互补。');
+  return lines.join('\n') + '\n';
 }
 
 export function stickerBatchBindings(items, modelId, promptFor = item => item?.prompt) {
@@ -165,10 +399,15 @@ function commentToggle(value, fallback) {
  *   topic?: string,
  *   digest?: string,
  *   language?: string,
+ *   type?: string,
+ *   narrative?: string,
+ *   summary?: string,
+ *   medium?: string,
+ *   style?: string,
  *   author?: string,
  *   needOpenComment?: boolean | number | string,
  *   onlyFansCanComment?: boolean | number | string,
- *   items?: Array<{ id: string, caption?: string }>,
+ *   items?: Array<{ id: string, viewpoint?: string, prompt?: string, caption?: string }>,
  *   filesByItem?: Record<string, string>,
  *   outputFiles?: Array<{ path?: string, size?: number, mtime?: number }>,
  *   directory?: string,
@@ -179,6 +418,11 @@ export function stickerPublicationFingerprintPayload({
   topic = '',
   digest = '',
   language = '',
+  type = '',
+  narrative = '',
+  summary = '',
+  medium = '',
+  style = '',
   author = '',
   needOpenComment = true,
   onlyFansCanComment = false,
@@ -195,6 +439,8 @@ export function stickerPublicationFingerprintPayload({
     const entry = outputByPath.get(file);
     return {
       id: item.id,
+      viewpoint: item.viewpoint || '',
+      prompt: item.prompt || '',
       caption: item.caption || '',
       file,
       relative: file && directory && file.startsWith(directory + '/')
@@ -208,6 +454,11 @@ export function stickerPublicationFingerprintPayload({
     title: String(title || topic || '').trim(),
     digest: String(digest || '').trim(),
     language: normalizeStickerLanguage(language),
+    type: String(type || '').trim(),
+    narrative: String(narrative || '').trim(),
+    summary: String(summary || '').trim(),
+    medium: String(medium || '').trim(),
+    style: String(style || '').trim(),
     author: String(author || '').trim(),
     needOpenComment: commentToggle(needOpenComment, true),
     onlyFansCanComment: commentToggle(onlyFansCanComment, false),
@@ -218,7 +469,8 @@ export function stickerPublicationFingerprintPayload({
 /**
  * @param {{
  *   topic?: string, count?: number, style?: string, medium?: string, language?: string,
- *   title?: string, digest?: string, items?: Array<{ id: string, prompt?: string, caption?: string }>,
+ *   planLanguage?: string, type?: string, narrative?: string, summary?: string,
+ *   title?: string, digest?: string, items?: Array<{ id: string, viewpoint?: string, prompt?: string, caption?: string }>,
  *   directory?: string, filesByItem?: Record<string, string>,
  *   itemStates?: Record<string, { state?: string, error?: string, taskId?: string }>, accountId?: string,
  *   receipt?: Record<string, any>,
@@ -230,6 +482,10 @@ export function stickerSessionSnapshot({
   style = '',
   medium = '',
   language = DEFAULT_STICKER_LANGUAGE,
+  planLanguage = '',
+  type = '',
+  narrative = '',
+  summary = '',
   title = '',
   digest = '',
   items = [],
@@ -247,10 +503,15 @@ export function stickerSessionSnapshot({
     style: String(style || ''),
     medium: String(medium || ''),
     language: normalizeStickerLanguage(language),
+    planLanguage: String(planLanguage || ''),
+    type: String(type || ''),
+    narrative: String(narrative || ''),
+    summary: String(summary || '').slice(0, 200),
     title: [...String(title || '')].slice(0, 64).join(''),
     digest: String(digest || '').slice(0, 120),
     items: (Array.isArray(items) ? items : []).map(item => ({
       id: String(item.id || ''),
+      viewpoint: String(item.viewpoint || ''),
       prompt: String(item.prompt || ''),
       caption: String(item.caption || ''),
     })).filter(item => item.id),
@@ -282,6 +543,7 @@ export function parseStickerSession(text) {
   const items = Array.isArray(value.items)
     ? value.items.map(item => ({
       id: String(item?.id || ''),
+      viewpoint: String(item?.viewpoint || ''),
       prompt: String(item?.prompt || ''),
       caption: String(item?.caption || ''),
     })).filter(item => item.id)
@@ -301,6 +563,10 @@ export function parseStickerSession(text) {
     style: String(value.style || ''),
     medium: String(value.medium || ''),
     language: normalizeStickerLanguage(value.language),
+    planLanguage: String(value.planLanguage || ''),
+    type: String(value.type || ''),
+    narrative: String(value.narrative || ''),
+    summary: String(value.summary || '').slice(0, 200),
     title: [...String(value.title || '')].slice(0, 64).join(''),
     digest: String(value.digest || '').slice(0, 120),
     items,

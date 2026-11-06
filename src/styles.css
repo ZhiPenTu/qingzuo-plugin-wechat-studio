@@ -419,6 +419,10 @@ input::placeholder, textarea::placeholder { color: var(--qz-text-muted); opacity
 .media-stage img { max-width: 100%; max-height: 65vh; object-fit: contain; }
 
 .sticker-plan { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.sticker-plan-brief { margin-bottom: 12px; padding: 12px; border: 1px solid var(--qz-border); border-radius: 8px; background: var(--qz-surface-subtle); }
+.sticker-plan-brief .section-heading { margin-bottom: 10px; }
+.sticker-plan-brief h3 { margin: 0 0 3px; font-size: 14px; }
+.sticker-plan-brief .form-grid { margin-bottom: 10px; }
 .sticker-item { border: 1px solid var(--qz-border); border-radius: 8px; padding: 12px; display: grid; gap: 10px; align-content: start; }
 .sticker-item.has-media { grid-template-columns: minmax(0, 1fr) 156px; }
 .sticker-item header { display: flex; align-items: center; justify-content: space-between; }

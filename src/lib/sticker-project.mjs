@@ -122,12 +122,12 @@ export async function materializeStickerProject(api, {
       src: 'user',
       type: '氛围',
       caption: item.caption || '',
-      context: '',
       style: '场景还原',
       aspect: '1:1',
       role: '节奏位',
       generate: false,
       file: relativeFiles[item.id],
+      context: String(item.viewpoint || ''),
       prompt: '',
     }));
     await api.workspace.writeText({ path: directory + '/article.md', text: markdown, overwrite: true });
