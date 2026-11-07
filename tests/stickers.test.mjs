@@ -317,6 +317,9 @@ test('sticker known failures can be retried and unknown states reset safely', ()
     publishId: null,
     articleFingerprint: '',
     error: null,
+    stale: false,
+    staleReason: null,
+    staleAt: null,
   });
 });
 
@@ -332,6 +335,7 @@ test('sticker draft matching requires the image-message delivery marker', () => 
   assert.equal(stickerDraftMatches({ ...current, delivery: 'image' }), true);
   assert.equal(stickerDraftMatches({ ...current, delivery: '' }), false);
   assert.equal(stickerDraftMatches({ ...current, delivery: 'news' }), false);
+  assert.equal(stickerDraftMatches({ ...current, delivery: 'image', stale: true }), false);
   assert.equal(stickerDraftMatches({ ...current, delivery: 'image', fingerprint: 'changed' }), false);
 });
 

@@ -6,7 +6,46 @@ export function hasSavedCover(project) {
   return Boolean(cover) && project.entries.some(entry => entry.path === project.directory + '/' + cover && entry.kind === 'file');
 }
 
-export async function articlePublicationFingerprint(project) {
+export function publicationReceiptDelivery(receipt = {}) {
+  const delivery = String(receipt.delivery || '').trim();
+  if (delivery === 'news' || delivery === 'image') return delivery;
+  return receipt.source === 'sticker' ? 'image' : 'news';
+}
+
+export function publicationReceiptConflictsWithNews(receipt = {}) {
+  return Boolean(
+    receipt
+    && typeof receipt === 'object'
+    && Object.keys(receipt).length > 0
+    && publicationReceiptDelivery(receipt) !== 'news'
+  );
+}
+
+export function articleDraftMatches({
+  fingerprintReady = false,
+  stale = false,
+  delivery = 'news',
+  mediaId = '',
+  accountId = '',
+  receiptMediaId = '',
+  receiptAccountId = '',
+  receiptFingerprint = '',
+  fingerprint = '',
+} = {}) {
+  return Boolean(
+    fingerprintReady
+    && !stale
+    && delivery === 'news'
+    && mediaId
+    && accountId
+    && receiptMediaId === mediaId
+    && receiptAccountId === accountId
+    && receiptFingerprint
+    && receiptFingerprint === fingerprint
+  );
+}
+
+export async function articlePublicationFingerprint(project, publishOptions = {}) {
   const html = project.files?.html || '';
   const localSources = [...html.matchAll(/<img\b[^>]*\bsrc=["']([^"']+)["']/gi)]
     .map(match => match[1])
@@ -23,6 +62,10 @@ export async function articlePublicationFingerprint(project) {
     cover: project.article?.cover_image || '',
     html,
     assets,
+    settings: {
+      needOpenComment: Number(publishOptions.needOpenComment || 0),
+      onlyFansCanComment: Number(publishOptions.onlyFansCanComment || 0),
+    },
   });
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
   return [...new Uint8Array(digest)].map(value => value.toString(16).padStart(2, '0')).join('');

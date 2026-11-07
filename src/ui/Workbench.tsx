@@ -3,23 +3,82 @@ import { api, errorText } from './client';
 import { Button, Empty, Field } from './common';
 import { McpPanel } from './McpPanel';
 import { createProject, loadProject, saveStage } from '../lib/project.mjs';
-import type { ArticleProject, McpServer, Notice, ProjectSummary } from './types';
+import type { ArticleProject, McpServer, ProjectSummary } from './types';
 
 type EntryMode = 'full' | 'rewrite' | 'new' | 'paste' | 'wechat' | 'continue';
+type SourceId = 'idea' | 'existing' | 'continue';
 
-const ENTRIES: Array<{ value: EntryMode; title: string; description: string }> = [
-  { value: 'full', title: '完整流程', description: '从选题、调研到排版、配图与发布，每一步确认后进入下一阶段。' },
-  { value: 'rewrite', title: '改写文章', description: '导入 Markdown 或纯文本，按账号规范和指定要求重写。' },
-  { value: 'new', title: '新写文章', description: '只给一个题目，直接按配置生成完整文章。' },
-  { value: 'paste', title: '粘贴文本', description: '手工提供正文素材，再从写稿或审稿开始。' },
-  { value: 'wechat', title: '公众号链接', description: '通过已授权的 MCP 网页读取工具获取正文；失败时回退到粘贴。' },
-  { value: 'continue', title: '继续已有草稿', description: '从本地 drafts/ 目录恢复项目，接续未完成的阶段。' },
+type ModeChoice = { value: EntryMode; title: string; description: string };
+type SourceChoice = { id: SourceId; title: string; description: string; defaultMode: EntryMode };
+
+const SOURCES: SourceChoice[] = [
+  { id: 'idea', title: '从想法开始', description: '给一个题目或方向，从选题一路写到可发布。', defaultMode: 'full' },
+  { id: 'existing', title: '导入或粘贴已有正文', description: '已经有稿子：粘贴正文、从文件导入，或读取公众号链接后改写。', defaultMode: 'paste' },
+  { id: 'continue', title: '继续作品', description: '从本地 drafts/ 恢复未完成的项目，接着上次的阶段继续。', defaultMode: 'continue' },
 ];
+
+const IDEA_MODES: ModeChoice[] = [
+  { value: 'full', title: '完整流程', description: '选题、调研、写稿、内容审、排版、配图与发布，每一步确认后进入下一阶段。' },
+  { value: 'new', title: '直接写正文', description: '只给题目和方向，直接按当前写作规范生成完整文章。' },
+];
+
+const EXISTING_MODES: ModeChoice[] = [
+  { value: 'paste', title: '粘贴正文', description: '手工粘贴或从文件导入正文，再从写稿或内容审开始。' },
+  { value: 'rewrite', title: '改写已有文章', description: '导入 Markdown 或纯文本，按账号规范和指定要求重写。' },
+  { value: 'wechat', title: '公众号链接', description: '通过已授权的 MCP 网页读取工具获取正文；失败时回退到粘贴。' },
+];
+
+const SOURCE_OF_MODE: Record<EntryMode, SourceId> = {
+  full: 'idea',
+  new: 'idea',
+  rewrite: 'existing',
+  paste: 'existing',
+  wechat: 'existing',
+  continue: 'continue',
+};
+
+function stageName(id: string) {
+  return {
+    topic: '选题', research: '调研', writing: '写稿', review: '内容审',
+    format: '排版', images: '配图', final: '终审', publish: '发布',
+  }[id] || id;
+}
+
+function ModeCards({
+  label,
+  choices,
+  value,
+  onChange,
+}: {
+  label: string;
+  choices: ModeChoice[];
+  value: EntryMode;
+  onChange: (mode: EntryMode) => void;
+}) {
+  return (
+    <div className="entry-grid" role="radiogroup" aria-label={label}>
+      {choices.map(choice => (
+        <button
+          type="button"
+          key={choice.value}
+          role="radio"
+          aria-checked={value === choice.value}
+          className={'entry-card' + (value === choice.value ? ' active' : '')}
+          onClick={() => onChange(choice.value)}
+        >
+          <strong>{choice.title}</strong>
+          <span>{choice.description}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
 
 export function Workbench({
   config,
   projects,
   servers,
+  workspaceEpoch,
   onOpenProject,
   onChanged,
   onPickWorkspace,
@@ -29,7 +88,8 @@ export function Workbench({
   config: Record<string, any>;
   projects: ProjectSummary[];
   servers: McpServer[];
-  onOpenProject: (project: ArticleProject) => void;
+  workspaceEpoch: number;
+  onOpenProject: (project: ArticleProject, epoch?: number) => void;
   onChanged: () => Promise<void>;
   onPickWorkspace: () => Promise<void>;
   setPage: (page: 'projects' | 'config' | 'assets' | 'stickers') => void;
@@ -44,7 +104,19 @@ export function Workbench({
   const [busy, setBusy] = useState(false);
   const [linkText, setLinkText] = useState('');
 
-  const selectedEntry = useMemo(() => ENTRIES.find(item => item.value === mode), [mode]);
+  const sourceId = SOURCE_OF_MODE[mode];
+  const selectedSource = useMemo(
+    () => SOURCES.find(item => item.id === sourceId) || SOURCES[0],
+    [sourceId],
+  );
+
+  function selectSource(id: SourceId) {
+    setMode(current => {
+      if (SOURCE_OF_MODE[current] === id) return current;
+      const target = SOURCES.find(item => item.id === id);
+      return target ? target.defaultMode : current;
+    });
+  }
 
   async function start() {
     const derivedTitle = title.trim() || topic.trim().slice(0, 40) || (mode === 'wechat' ? '公众号文章改写' : '');
@@ -59,13 +131,15 @@ export function Workbench({
     setBusy(true);
     try {
       const initialStage = mode === 'full' ? 'topic' : 'writing';
-      const created = await createProject(api, {
+      const options = {
         title: derivedTitle,
         mode,
         source: source || linkText || url,
+        topic: topic.trim(),
         initialStage,
         draftsRoot: config.drafts_root || 'drafts',
-      });
+      };
+      const created = await createProject(api, options);
       const initialSource = mode === 'wechat' ? linkText : source;
       if (initialSource.trim()) {
         await api.workspace.writeText({
@@ -84,7 +158,7 @@ export function Workbench({
       }
       const project = await loadProject(api, created.directory);
       await onChanged();
-      onOpenProject(project as unknown as ArticleProject);
+      onOpenProject(project as unknown as ArticleProject, workspaceEpoch);
       notify(mode === 'full' ? '项目已创建，从选题开始。' : '素材已保存，可继续生成或编辑。', 'success');
     } catch (error) {
       notify(errorText(error), 'danger');
@@ -106,32 +180,32 @@ export function Workbench({
       <section className="entry-section">
         <div className="section-heading">
           <div>
-            <h2>选择入口</h2>
-            <p>完整流程适合从零开始；改写和粘贴适合已有长文。</p>
+            <h2>文章</h2>
+            <p>先选内容来源，再决定是新建一篇还是接着上次写。</p>
           </div>
         </div>
         <div className="entry-grid" role="radiogroup" aria-label="创作入口">
-          {ENTRIES.map(entry => (
+          {SOURCES.map(item => (
             <button
               type="button"
-              key={entry.value}
+              key={item.id}
               role="radio"
-              aria-checked={mode === entry.value}
-              className={'entry-card' + (mode === entry.value ? ' active' : '')}
-              onClick={() => setMode(entry.value)}
+              aria-checked={sourceId === item.id}
+              className={'entry-card' + (sourceId === item.id ? ' active' : '')}
+              onClick={() => selectSource(item.id)}
             >
-              <strong>{entry.title}</strong>
-              <span>{entry.description}</span>
+              <strong>{item.title}</strong>
+              <span>{item.description}</span>
             </button>
           ))}
         </div>
       </section>
 
-      {mode === 'continue' ? (
+      {sourceId === 'continue' ? (
         <section className="panel">
           <div className="section-heading">
             <div>
-              <h2>继续已有草稿</h2>
+              <h2>继续作品</h2>
               <p>从工作区的 drafts/ 目录读取。外部修改后可在项目页重新加载。</p>
             </div>
             <Button type="button" onClick={() => void onChanged()}>刷新列表</Button>
@@ -145,8 +219,8 @@ export function Workbench({
                   key={project.directory}
                   onClick={async () => {
                     try {
-                      onOpenProject(await loadProject(api, project.directory) as unknown as ArticleProject);
-                      setPage('projects');
+                      const loaded = await loadProject(api, project.directory) as unknown as ArticleProject;
+                      onOpenProject(loaded, workspaceEpoch);
                     } catch (error) {
                       notify(errorText(error), 'danger');
                     }
@@ -168,15 +242,21 @@ export function Workbench({
         <section className="panel">
           <div className="section-heading">
             <div>
-              <h2>{selectedEntry?.title}</h2>
-              <p>{selectedEntry?.description}</p>
+              <h2>{selectedSource.title}</h2>
+              <p>{selectedSource.description}</p>
             </div>
           </div>
+          <ModeCards
+            label={sourceId === 'idea' ? '创作方式' : '内容来源方式'}
+            choices={sourceId === 'idea' ? IDEA_MODES : EXISTING_MODES}
+            value={mode}
+            onChange={setMode}
+          />
           <div className="form-grid">
             <Field label="文章标题" hint="会用于创建 drafts/YYYYMMDD-slug/。">
               <input value={title} onChange={event => setTitle(event.target.value)} placeholder="例如：公众号配置一次就够" />
             </Field>
-            {mode === 'full' || mode === 'new' ? (
+            {sourceId === 'idea' ? (
               <Field label="主题或既定方向">
                 <input value={topic} onChange={event => setTopic(event.target.value)} placeholder="例如：用自动化减少重复排版" />
               </Field>
@@ -255,31 +335,41 @@ export function Workbench({
         </section>
       )}
 
-      <section className="quick-grid">
-        <button type="button" className="quick-card" onClick={() => setPage('projects')}>
-          <strong>文章项目</strong>
-          <span>{projects.length ? projects.length + ' 个本地项目' : '还没有项目'}</span>
-        </button>
-        <button type="button" className="quick-card" onClick={() => setPage('config')}>
-          <strong>配置中心</strong>
-          <span>账号、写作规范、主题与发布设置</span>
-        </button>
-        <button type="button" className="quick-card" onClick={() => setPage('assets')}>
-          <strong>业务素材库</strong>
-          <span>产品介绍、图片来源与说明</span>
-        </button>
+      <section className="entry-section">
+        <div className="section-heading">
+          <div>
+            <h2>贴图</h2>
+            <p>把一组图片做成统一风格的多图内容，并逐图配文。</p>
+          </div>
+        </div>
         <button type="button" className="quick-card" onClick={() => setPage('stickers')}>
-          <strong>贴图工作流</strong>
-          <span>1–9 张统一风格的图片和逐图配文</span>
+          <strong>进入贴图工作流</strong>
+          <span>1–9 张统一风格的图片和逐图配文，可保存为文章项目或发送到公众号。</span>
         </button>
+      </section>
+
+      <section className="entry-section">
+        <div className="section-heading">
+          <div>
+            <h2>常用入口</h2>
+            <p>管理已有项目、账号规范和业务素材。</p>
+          </div>
+        </div>
+        <div className="entry-grid">
+          <button type="button" className="quick-card" onClick={() => setPage('projects')}>
+            <strong>文章项目</strong>
+            <span>{projects.length ? projects.length + ' 个本地项目' : '还没有项目'}</span>
+          </button>
+          <button type="button" className="quick-card" onClick={() => setPage('config')}>
+            <strong>配置中心</strong>
+            <span>账号、写作规范、主题与发布设置</span>
+          </button>
+          <button type="button" className="quick-card" onClick={() => setPage('assets')}>
+            <strong>业务素材库</strong>
+            <span>产品介绍、图片来源与说明</span>
+          </button>
+        </div>
       </section>
     </div>
   );
-}
-
-function stageName(id: string) {
-  return {
-    topic: '选题', research: '调研', writing: '写稿', review: '内容审',
-    format: '排版', images: '配图', final: '终审', publish: '发布',
-  }[id] || id;
 }

@@ -1,5 +1,5 @@
 import { parseYamlObject } from './config.mjs';
-import { saveArticle } from './project.mjs';
+import { markReceiptStale, saveArticle } from './project.mjs';
 import { formatReviewMarkdown, reviewBlockFix } from './review.mjs';
 
 function isMissingError(error) {
@@ -26,6 +26,22 @@ async function restoreExisting(api, path, snapshot) {
     return;
   }
   await api.workspace.remove({ path, recursive: false }).catch(() => {});
+}
+
+function parseReceipt(text) {
+  try {
+    const value = JSON.parse(text || '{}');
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+async function restoreIfChanged(api, path, snapshot) {
+  if (!snapshot.exists) return;
+  const current = await readExisting(api, path);
+  if (current.exists && current.text === snapshot.text) return;
+  await restoreExisting(api, path, snapshot);
 }
 
 export async function applyBlockFix(api, {
@@ -62,10 +78,13 @@ export async function applyBlockFix(api, {
       : [directory + '/article.html']),
     directory + '/img-plan.json',
     directory + '/final-review.md',
-    directory + '/publish.json',
+    directory + '/.qz-draft-format.json',
+    directory + '/.qz-draft-review.json',
   ];
   const previousStale = [];
   for (const path of stalePaths) previousStale.push({ path, ...(await readExisting(api, path)) });
+  const publishPath = directory + '/publish.json';
+  const publishSnapshot = await readExisting(api, publishPath);
   const beforeWrite = await readExisting(api, sourcePath);
   if (!beforeWrite.exists || beforeWrite.text !== source) {
     return { ok: false, reason: 'stale', remaining: [] };
@@ -87,6 +106,16 @@ export async function applyBlockFix(api, {
     }
     await api.workspace.writeText({ path: directory + '/review.md', text: reviewText, overwrite: true });
     reviewWritten = true;
+    if (publishSnapshot.exists) {
+      const receipt = parseReceipt(publishSnapshot.text);
+      if (receipt) {
+        await api.workspace.writeText({
+          path: publishPath,
+          text: JSON.stringify(markReceiptStale(receipt), null, 2),
+          overwrite: true,
+        });
+      }
+    }
     for (const item of previousStale) {
       if (!item.exists) continue;
       await api.workspace.remove({ path: item.path, recursive: false });
@@ -115,6 +144,8 @@ export async function applyBlockFix(api, {
       await restoreExisting(api, item.path, item)
         .catch(() => rollbackFailures.push(item.path));
     }
+    await restoreIfChanged(api, publishPath, publishSnapshot)
+      .catch(() => rollbackFailures.push(publishPath));
     return { ok: false, reason: 'write', error, rollbackFailures, fixed };
   }
   return { ok: true, fixed, reviewText };

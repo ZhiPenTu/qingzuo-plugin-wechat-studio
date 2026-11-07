@@ -216,8 +216,10 @@ test('titles and leads inside code fences do not satisfy structural checks', () 
   const markdown = '```md\n# 假标题\n\n> 假导语\n```\n\n## 一\n\n正文段落。\n\n## 二\n\n另一段正文。\n';
   const result = reviewArticle(markdown, { target_word_count: '10-500' });
   assert.equal(result.ok, false);
-  assert.ok(result.issues.some(item => item.category === '写作规范' && /文章标题/.test(item.message)));
-  assert.ok(result.issues.some(item => item.category === '写作规范' && /摘要导语/.test(item.message)));
+  const titleIssue = result.issues.find(item => item.category === '写作规范' && /文章标题/.test(item.message));
+  const leadIssue = result.issues.find(item => item.category === '写作规范' && /摘要导语/.test(item.message));
+  assert.equal(titleIssue?.level, 'block');
+  assert.equal(leadIssue?.level, 'warning');
 });
 
 test('tilde and long fences are also excluded from structural checks', () => {
@@ -303,6 +305,45 @@ test('clean article has no blocking issues', () => {
   const result = reviewArticle(clean, { target_word_count: '10-500' });
   assert.equal(result.ok, true);
   assert.equal(result.counts.block, 0);
+});
+
+test('writing preferences alone keep the article publishable', () => {
+  const styleOnly = '# 只有标题\n\n正文没有导语，也没有小节。';
+  const result = reviewArticle(styleOnly, { target_word_count: '10-100' });
+  assert.equal(result.ok, true);
+  assert.equal(result.counts.block, 0);
+  assert.equal(result.issues.every(item => item.level !== 'block'), true);
+  assert.ok(result.issues.some(item => item.level === 'warning' && item.category === '写作规范' && /摘要导语/.test(item.message)));
+  assert.ok(result.issues.some(item => item.level === 'warning' && item.category === '写作规范' && /两个/.test(item.message)));
+});
+
+test('hard blocks still win over writing preferences', () => {
+  const styleOnly = '# 只有标题\n\n正文没有导语，也没有小节。';
+
+  const sensitive = reviewArticle(styleOnly + '\n\n禁用词：绝对第一', {
+    target_word_count: '10-100',
+    forbidden_words: ['绝对第一'],
+  });
+  assert.equal(sensitive.ok, false);
+  assert.ok(sensitive.issues.some(item => item.level === 'block' && item.category === '敏感词'));
+
+  const forbiddenTitle = reviewArticle(styleOnly, {
+    target_word_count: '10-100',
+    forbidden_title_phrases: ['震惊'],
+  }, { title: '震惊的标题写法' });
+  assert.equal(forbiddenTitle.ok, false);
+  assert.ok(forbiddenTitle.issues.some(item => item.level === 'block' && item.category === '标题规范'));
+
+  const longTitle = reviewArticle(styleOnly, {
+    target_word_count: '10-100',
+    title_max_length: 4,
+  }, { title: '超过四个字的标题' });
+  assert.equal(longTitle.ok, false);
+  assert.ok(longTitle.issues.some(item => item.level === 'block' && item.category === '标题规范'));
+
+  const noTitle = reviewArticle('## 只有小节\n\n> 导语。\n\n正文内容。', { target_word_count: '10-100' });
+  assert.equal(noTitle.ok, false);
+  assert.ok(noTitle.issues.some(item => item.level === 'block' && /文章标题/.test(item.message)));
 });
 
 test('forbidden words and external images block publication', () => {

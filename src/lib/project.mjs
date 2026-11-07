@@ -23,6 +23,18 @@ export const STAGE_FILES = {
   publish: 'publish.json',
 };
 
+export const PUBLICATION_STALE_REASON = 'upstream-changed';
+
+export const DERIVED_ARTIFACT_FILES = ['article.md', 'article.html', 'img-plan.json', 'final-review.md'];
+
+const EDITOR_DRAFT_FILES = {
+  topic: ['.qz-draft-topic.json'],
+  research: ['.qz-draft-research.json', '.qz-draft-research-topic.json'],
+  writing: ['.qz-draft-writing.json'],
+  review: ['.qz-draft-review.json'],
+  format: ['.qz-draft-format.json'],
+};
+
 export function slugify(value) {
   const ascii = String(value || '')
     .normalize('NFKD')
@@ -68,12 +80,22 @@ function pipelineText(value) {
   return YAML.stringify(value, { lineWidth: 0 });
 }
 
-export async function createProject(api, { title, mode = 'full', source = '', initialStage = 'topic', draftsRoot = 'drafts' }, date = new Date()) {
+export async function createProject(api, {
+  title,
+  mode = 'full',
+  source = '',
+  topic = '',
+  direction = '',
+  initialStage = 'topic',
+  draftsRoot = 'drafts',
+}, date = new Date()) {
   const stage = STAGES.some(item => item.id === initialStage) ? initialStage : 'topic';
   const root = normalizeDraftsRoot(draftsRoot);
   const directory = await uniqueArticleDirectory(api, title, date, root);
   const ownerMarker = directory + '/.qz-owner';
   const ownerToken = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+  const topicInfo = normalizeTopicOption(topic, direction);
+  const topicText = topicInfo.topic || String(source || '').trim();
   let ownsDirectory = false;
   try {
     await api.workspace.mkdir({ path: directory });
@@ -90,9 +112,20 @@ export async function createProject(api, { title, mode = 'full', source = '', in
       content_source: 'article.html',
     };
     await api.workspace.writeText({ path: directory + '/article.yaml', text: serializeArticle(article), overwrite: false });
+    const pipeline = {
+      schemaVersion: 1,
+      stage,
+      status: 'active',
+      mode,
+      created: date.toISOString(),
+      source,
+      topic: topicText,
+      completed: [],
+    };
+    if (topicInfo.direction) pipeline.direction = topicInfo.direction;
     await api.workspace.writeText({
       path: directory + '/pipeline.yaml',
-      text: pipelineText({ schemaVersion: 1, stage, status: 'active', mode, created: date.toISOString(), source, completed: [] }),
+      text: pipelineText(pipeline),
       overwrite: false,
     });
     await api.workspace.writeText({
@@ -105,7 +138,19 @@ export async function createProject(api, { title, mode = 'full', source = '', in
       text: '# 阶段日志\n\n- ' + date.toISOString() + ' 创建项目，进入「' + STAGES.find(item => item.id === stage).label + '」。\n',
       overwrite: false,
     });
-    return { directory, article, pipeline: { stage, status: 'active', mode, completed: [] } };
+    return {
+      directory,
+      article,
+      pipeline: {
+        stage,
+        status: 'active',
+        mode,
+        source,
+        topic: topicText,
+        ...(topicInfo.direction ? { direction: topicInfo.direction } : {}),
+        completed: [],
+      },
+    };
   } catch (error) {
     if (ownsDirectory) await api.workspace.remove({ path: directory, recursive: true }).catch(() => {});
     throw error;
@@ -119,6 +164,69 @@ export async function readOptional(api, path) {
     if (isMissingError(error)) return '';
     throw error;
   }
+}
+
+async function readSnapshot(api, path) {
+  try {
+    return { exists: true, text: await api.workspace.readText({ path }) };
+  } catch (error) {
+    if (isMissingError(error)) return { exists: false, text: '' };
+    throw error;
+  }
+}
+
+async function restoreSnapshot(api, path, snapshot) {
+  if (snapshot.exists) {
+    await api.workspace.writeText({ path, text: snapshot.text, overwrite: true });
+    return;
+  }
+  await api.workspace.remove({ path, recursive: false }).catch(() => {});
+}
+
+async function restoreIfChanged(api, path, snapshot) {
+  try {
+    const current = await readSnapshot(api, path);
+    if (current.exists === snapshot.exists && current.text === snapshot.text) return;
+  } catch {
+    // 无法比较时按回滚处理。
+  }
+  await restoreSnapshot(api, path, snapshot);
+}
+
+function normalizeTopicOption(topic, direction) {
+  if (topic && typeof topic === 'object' && !Array.isArray(topic)) {
+    return {
+      topic: String(topic.title || topic.topic || topic.name || '').trim(),
+      direction: String(topic.direction || direction || '').trim(),
+    };
+  }
+  return {
+    topic: String(topic || '').trim(),
+    direction: String(direction || '').trim(),
+  };
+}
+
+function normalizeIsoTime(value) {
+  if (value) {
+    const date = new Date(value);
+    if (!Number.isNaN(date.getTime())) return date.toISOString();
+  }
+  return new Date().toISOString();
+}
+
+export function markReceiptStale(receipt, options = {}) {
+  const base = receipt && typeof receipt === 'object' && !Array.isArray(receipt) ? receipt : {};
+  const reason = String(options.reason || PUBLICATION_STALE_REASON);
+  return {
+    ...base,
+    stale: true,
+    staleReason: reason,
+    staleAt: normalizeIsoTime(options.at),
+  };
+}
+
+export function isPublicationStale(receipt) {
+  return Boolean(receipt && typeof receipt === 'object' && receipt.stale);
 }
 
 function isMissingError(error) {
@@ -213,22 +321,141 @@ export async function deleteProjectDirectory(api, directory) {
   return { cleaned: true, trashPath: tombstone };
 }
 
+function stageIndex(stage) {
+  return STAGES.findIndex(item => item.id === stage);
+}
+
+function resolveInvalidationStage(value, includeReview) {
+  const requested = String(value || '').trim();
+  if (requested && stageIndex(requested) >= 0) return requested;
+  return includeReview ? 'review' : 'format';
+}
+
+function isDownstreamStage(stage, fromStage) {
+  const from = stageIndex(fromStage);
+  const index = stageIndex(stage);
+  if (from < 0 || index < 0) return false;
+  return index >= from;
+}
+
+function editorDraftsFor(fromStage) {
+  const from = stageIndex(fromStage);
+  if (from < 0) return [];
+  return STAGES
+    .filter(stage => stageIndex(stage.id) >= from)
+    .flatMap(stage => EDITOR_DRAFT_FILES[stage.id] || []);
+}
+
+function prunedPipelineState(snapshot, fromStage) {
+  if (!snapshot.exists) return { changed: false, completed: [], pipeline: null };
+  let pipeline = null;
+  try {
+    pipeline = YAML.parse(snapshot.text) || {};
+  } catch {
+    return { changed: false, completed: [], pipeline: null };
+  }
+  if (!pipeline || typeof pipeline !== 'object' || Array.isArray(pipeline)) {
+    return { changed: false, completed: [], pipeline: null };
+  }
+  const completed = Array.isArray(pipeline.completed)
+    ? pipeline.completed.filter(item => typeof item === 'string')
+    : [];
+  const kept = completed.filter(item => !isDownstreamStage(item, fromStage));
+  const stageChanged = pipeline.stage !== fromStage;
+  if (kept.length === completed.length && !stageChanged) {
+    return { changed: false, completed: kept, pipeline };
+  }
+  return {
+    changed: true,
+    completed: kept,
+    pipeline: { ...pipeline, stage: fromStage, completed: kept, updated: new Date().toISOString() },
+  };
+}
+
+async function writeStaleReceipt(api, publishPath, snapshot, options = {}) {
+  if (!snapshot.exists) return { changed: false, stale: false, receipt: null };
+  let receipt = null;
+  try {
+    receipt = JSON.parse(snapshot.text || '{}');
+  } catch {
+    return { changed: false, stale: false, receipt: null };
+  }
+  if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)) {
+    return { changed: false, stale: false, receipt: null };
+  }
+  const next = markReceiptStale(receipt, options);
+  await api.workspace.writeText({
+    path: publishPath,
+    text: JSON.stringify(next, null, 2),
+    overwrite: true,
+  });
+  return { changed: true, stale: true, receipt: next };
+}
+
+export async function markPublicationStale(api, directory, options = {}) {
+  const path = directory + '/publish.json';
+  const snapshot = await readSnapshot(api, path);
+  const result = await writeStaleReceipt(api, path, snapshot, options);
+  return { path, stale: result.stale, receipt: result.receipt, changed: result.changed };
+}
+
 export async function invalidateDerivedProjectFiles(api, directory, options = {}) {
-  const files = [
-    ...(options.includeReview === false ? [] : ['review.md']),
-    'article.md',
-    'article.html',
-    'img-plan.json',
-    'final-review.md',
-    'publish.json',
+  const includeReview = options.includeReview !== false;
+  let fromStage = resolveInvalidationStage(options.fromStage, includeReview);
+  if (!includeReview && stageIndex(fromStage) >= 0 && stageIndex(fromStage) < stageIndex('format')) {
+    fromStage = 'format';
+  }
+  const targets = [
+    ...(includeReview ? ['review.md'] : []),
+    ...DERIVED_ARTIFACT_FILES,
+    ...editorDraftsFor(fromStage),
   ];
-  for (const file of files) {
-    const path = directory + '/' + file;
-    try {
+  const pipelinePath = directory + '/pipeline.yaml';
+  const publishPath = directory + '/publish.json';
+  const pipelineSnapshot = await readSnapshot(api, pipelinePath);
+  const publishSnapshot = await readSnapshot(api, publishPath);
+  const removed = [];
+  try {
+    for (const file of targets) {
+      const path = directory + '/' + file;
+      const snapshot = await readSnapshot(api, path);
+      if (!snapshot.exists) continue;
       await api.workspace.remove({ path, recursive: false });
-    } catch (error) {
-      if (!isMissingError(error)) throw error;
+      removed.push({ path, text: snapshot.text });
     }
+    const pruned = prunedPipelineState(pipelineSnapshot, fromStage);
+    if (pruned.changed) {
+      await api.workspace.writeText({
+        path: pipelinePath,
+        text: pipelineText(pruned.pipeline),
+        overwrite: true,
+      });
+    }
+    const stale = await writeStaleReceipt(api, publishPath, publishSnapshot, options.stale);
+    return {
+      removed: removed.map(item => item.path),
+      stale: stale.stale,
+      receipt: stale.receipt,
+      completed: pruned.completed,
+      fromStage,
+    };
+  } catch (error) {
+    const rollbackFailures = [];
+    for (const item of removed) {
+      await api.workspace.writeText({ path: item.path, text: item.text, overwrite: true })
+        .catch(() => rollbackFailures.push(item.path));
+    }
+    await restoreIfChanged(api, publishPath, publishSnapshot)
+      .catch(() => rollbackFailures.push(publishPath));
+    await restoreIfChanged(api, pipelinePath, pipelineSnapshot)
+      .catch(() => rollbackFailures.push(pipelinePath));
+    if (rollbackFailures.length) {
+      const next = new Error((error instanceof Error ? error.message : String(error))
+        + '；自动回滚失败：' + rollbackFailures.join('、'));
+      next.rollbackFailures = rollbackFailures;
+      throw next;
+    }
+    throw error;
   }
 }
 
@@ -247,6 +474,9 @@ export async function saveStage(api, directory, stage, content, options = {}) {
     if (!String(project.files[stage] || '').trim()) throw new Error('当前阶段还没有可完成的内容，请先保存并预览结果。');
   }
   const completed = new Set(Array.isArray(project.pipeline.completed) ? project.pipeline.completed : []);
+  for (const item of [...completed]) {
+    if (stageIndex(item) > stageIndex(stage)) completed.delete(item);
+  }
   if (options.complete !== false) completed.add(stage);
   const next = options.next === false ? stage : nextStage(stage);
   const pipeline = {
@@ -285,6 +515,23 @@ export async function saveArticle(api, directory, patch) {
   }
   await api.workspace.writeText({ path: directory + '/article.yaml', text: serializeArticle(article), overwrite: true });
   return article;
+}
+
+export async function saveProjectTopic(api, directory, topic, direction = '') {
+  const info = normalizeTopicOption(topic, direction);
+  const project = await loadProject(api, directory);
+  const pipeline = {
+    ...project.pipeline,
+    topic: info.topic,
+    ...(info.direction ? { direction: info.direction } : {}),
+    updated: new Date().toISOString(),
+  };
+  await api.workspace.writeText({
+    path: directory + '/pipeline.yaml',
+    text: pipelineText(pipeline),
+    overwrite: true,
+  });
+  return pipeline;
 }
 
 export async function saveConfigFiles(api, config, rawConfig) {

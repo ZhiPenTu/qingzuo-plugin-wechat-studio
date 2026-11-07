@@ -16,7 +16,7 @@ const clean = `# 标题
 - **再复核**：确认数字与正文一致。
 `;
 
-function workspaceFixture(files, failWriteAt = 0, afterWrite = null) {
+function workspaceFixture(files, failWriteAt = 0, afterWrite = null, failRemovePaths = []) {
   const writes = [];
   const removals = [];
   let writeCount = 0;
@@ -40,6 +40,7 @@ function workspaceFixture(files, failWriteAt = 0, afterWrite = null) {
       },
       async remove({ path }) {
         removals.push({ path });
+        if (failRemovePaths.includes(path)) throw new Error('remove failed');
         delete files[path];
       },
     },
@@ -186,14 +187,60 @@ test('draft fixes invalidate stale format artifacts', async () => {
   assert.equal(files['drafts/article/article.html'], undefined);
   assert.equal(files['drafts/article/img-plan.json'], undefined);
   assert.equal(files['drafts/article/final-review.md'], undefined);
-  assert.equal(files['drafts/article/publish.json'], undefined);
+  assert.notEqual(files['drafts/article/publish.json'], undefined);
   assert.deepEqual(removals.map(item => item.path), [
     'drafts/article/article.md',
     'drafts/article/article.html',
     'drafts/article/img-plan.json',
     'drafts/article/final-review.md',
-    'drafts/article/publish.json',
   ]);
+});
+
+test('block fixes keep the publication receipt and mark it stale', async () => {
+  const source = fixOptions().source;
+  const { api, files, removals } = workspaceFixture({
+    'drafts/article/draft.md': source,
+    'drafts/article/publish.json': JSON.stringify({
+      state: 'unknown',
+      mediaId: 'MEDIA-1',
+      publishId: 'PUBLISH-1',
+      accountId: 'acc-1',
+      delivery: 'draft',
+      articleFingerprint: 'FP-1',
+    }),
+    'drafts/article/review.md': '# 旧审稿\n',
+  });
+  const result = await applyBlockFix(api, fixOptions());
+  assert.equal(result.ok, true);
+  assert.equal(removals.some(item => item.path === 'drafts/article/publish.json'), false);
+  const receipt = JSON.parse(files['drafts/article/publish.json']);
+  assert.equal(receipt.stale, true);
+  assert.equal(receipt.staleReason, 'upstream-changed');
+  assert.match(receipt.staleAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+  assert.equal(receipt.state, 'unknown');
+  assert.equal(receipt.mediaId, 'MEDIA-1');
+  assert.equal(receipt.publishId, 'PUBLISH-1');
+  assert.equal(receipt.accountId, 'acc-1');
+  assert.equal(receipt.delivery, 'draft');
+  assert.equal(receipt.articleFingerprint, 'FP-1');
+});
+
+test('a failed cleanup restores the publication receipt', async () => {
+  const source = fixOptions().source;
+  const receiptText = JSON.stringify({ state: 'drafted', mediaId: 'MEDIA-2' });
+  const { api, files } = workspaceFixture({
+    'drafts/article/draft.md': source,
+    'drafts/article/article.html': '<p>旧排版</p>',
+    'drafts/article/publish.json': receiptText,
+    'drafts/article/review.md': '# 旧审稿\n',
+  }, 0, null, ['drafts/article/article.html']);
+  const result = await applyBlockFix(api, fixOptions());
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'write');
+  assert.deepEqual(result.rollbackFailures, []);
+  assert.equal(files['drafts/article/draft.md'], source);
+  assert.equal(files['drafts/article/review.md'], '# 旧审稿\n');
+  assert.equal(files['drafts/article/publish.json'], receiptText);
 });
 
 test('article.md source is updated in place and only stale HTML is removed', async () => {

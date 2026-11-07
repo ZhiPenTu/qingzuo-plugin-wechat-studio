@@ -1,4 +1,4 @@
-import { checkDraft, normalizeBodyMarkdown, splitMarkdownBlocks } from './writing.mjs';
+import { UNCLOSED_FENCE_MESSAGE, checkDraft, normalizeBodyMarkdown, splitMarkdownBlocks } from './writing.mjs';
 import { isCoverImageAlt } from './markdown.mjs';
 import { fencesBalanced, lineCodeFlags } from './markdown-syntax.mjs';
 
@@ -359,8 +359,10 @@ export function reviewArticle(markdown, config = {}, extras = {}) {
   const result = checkDraft(source, config);
   const issues = [];
 
-  if (!fencesBalanced(source.split('\n'))) issues.push(issue('block', 'Markdown', '代码围栏未闭合，无法可靠排版。'));
-  for (const message of result.issues) issues.push(issue('block', '写作规范', message));
+  for (const message of result.issues) {
+    const category = message === UNCLOSED_FENCE_MESSAGE ? 'Markdown' : '写作规范';
+    issues.push(issue('block', category, message));
+  }
   for (const message of result.warnings) issues.push(issue('warning', '写作规范', message));
 
   const forbidden = [...(config.forbidden_words || []), ...(config.custom_sensitive_words || [])];
