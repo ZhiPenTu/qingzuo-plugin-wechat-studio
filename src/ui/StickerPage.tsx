@@ -6,6 +6,7 @@ import { buildStickerPrompt } from '../lib/prompts.mjs';
 import { imageModelLabel, imageModelSource, imageParametersForModel } from '../lib/image-models.mjs';
 import { generateImagesThroughMcp, mcpBatchToken, mcpImageSize } from '../lib/mcp-images.mjs';
 import { renderMarkdownDocument } from '../lib/markdown.mjs';
+import { publicationReceiptDelivery } from '../lib/publication.mjs';
 import {
   materializeStickerProject,
   stickerProjectArticleFingerprint,
@@ -130,14 +131,17 @@ export function StickerPage({
   const publishId = String(receipt.publishId || '');
   const draftState = String(receipt.state || '');
   const receiptSourceFingerprint = String(receipt.sourceFingerprint || receipt.articleFingerprint || '');
+  const receiptDelivery = publicationReceiptDelivery(receipt);
+  const newsReceiptConflict = Object.keys(receipt).length > 0 && receiptDelivery !== 'image';
   const draftBlocked = stickerPublishBlocked(draftState);
   const draftBlockedReason = draftState === 'failed'
     ? '上次发布未成功。请先核对公众号后台，再重置本地状态并重新创建草稿。'
     : '上次草稿或发布操作的结果未知。请先在公众号后台核对；确认后才能继续或明确重置。';
   const draftMatches = stickerDraftMatches({
     fingerprintReady,
+    stale: Boolean(receipt.stale),
     mediaId,
-    delivery: receipt.delivery,
+    delivery: receiptDelivery,
     accountId,
     receiptAccountId: receipt.accountId,
     receiptFingerprint: receiptSourceFingerprint,
@@ -390,9 +394,9 @@ export function StickerPage({
   async function persistReceipt(dir: string, patch: Record<string, any>) {
     if (!dir) return;
     const next = { ...receiptRef.current, ...patch, updatedAt: new Date().toISOString() };
-    await api.workspace.writeText({ path: dir + '/publish.json', text: JSON.stringify(next, null, 2), overwrite: true });
     receiptRef.current = next;
     setReceipt(next);
+    await api.workspace.writeText({ path: dir + '/publish.json', text: JSON.stringify(next, null, 2), overwrite: true });
   }
 
   async function persistProjectReceipt(projectDirectory: string, patch: Record<string, any>) {
@@ -1205,6 +1209,10 @@ export function StickerPage({
       notify('请先补齐标题，并确保每一张贴图都已生成。', 'warning');
       return;
     }
+    if (newsReceiptConflict) {
+      notify('当前回执属于图文草稿，不能从贴图工作流覆盖。请回到文章项目处理。', 'danger');
+      return;
+    }
     if (!draftEnabled) {
       notify('当前配置为只保存到本地，不会创建公众号图片消息草稿。', 'warning');
       return;
@@ -1217,6 +1225,7 @@ export function StickerPage({
     let dir = '';
     let projectDirectory = '';
     let hostCalled = false;
+    let createdMediaId = '';
     try {
       dir = await ensureStickerDirectory();
       await persistPlan(dir, filesByItem);
@@ -1240,6 +1249,9 @@ export function StickerPage({
         publishId: null,
         state: 'creating-draft',
         delivery: 'image',
+        stale: false,
+        staleReason: null,
+        staleAt: null,
         articleFingerprint: project.articleFingerprint,
         sourceFingerprint: project.fingerprint,
         source: 'sticker',
@@ -1254,12 +1266,16 @@ export function StickerPage({
       await persistStickerSession(dir);
       hostCalled = true;
       const result = await api.wechat.createDraft(payload);
+      createdMediaId = result.mediaId;
       await persistDraftReceipt(dir, project.directory, {
         accountId,
         mediaId: result.mediaId,
         publishId: null,
         state: 'draft',
         delivery: 'image',
+        stale: false,
+        staleReason: null,
+        staleAt: null,
         title: project.title,
         articleFingerprint: project.articleFingerprint,
         sourceFingerprint: project.fingerprint,
@@ -1269,10 +1285,19 @@ export function StickerPage({
       notify('整组贴图已创建公众号图片消息草稿。请先在后台核对，再决定是否发布。', 'success');
     } catch (error) {
       const uncertain = hostCalled;
-      const nextState = uncertain ? 'draft-unknown' : 'draft-failed';
-      if (dir) await persistDraftReceipt(dir, projectDirectory, { state: nextState, error: errorText(error) }).catch(() => {});
+      const nextState = createdMediaId ? 'draft' : uncertain ? 'draft-unknown' : 'draft-failed';
+      if (dir) {
+        await persistDraftReceipt(dir, projectDirectory, {
+          state: nextState,
+          ...(createdMediaId ? { mediaId: createdMediaId } : {}),
+          delivery: 'image',
+          error: errorText(error),
+        }).catch(() => {});
+      }
       notify(
-        uncertain
+        createdMediaId
+          ? '图片消息草稿已创建，但本地回执保存失败：' + errorText(error) + '。请立即核对 mediaId，避免重复创建。'
+          : uncertain
           ? '图片消息草稿创建结果不确定：' + errorText(error) + '。请先在公众号后台核对，避免重复创建。'
           : '创建图片消息草稿前检查失败：' + errorText(error) + '。已保留贴图方案和文章项目，可修正后重试。',
         'danger',
@@ -1303,6 +1328,10 @@ export function StickerPage({
       notify('当前配置为仅创建草稿，直接发布已关闭。', 'warning');
       return;
     }
+    if (newsReceiptConflict) {
+      notify('当前回执属于图文草稿，不能从贴图工作流提交发布。', 'danger');
+      return;
+    }
     if (draftBlocked) {
       notify('上次发布结果未知，请先查询状态或在公众号后台核对，禁止重复提交。', 'warning');
       return;
@@ -1311,6 +1340,7 @@ export function StickerPage({
     let dir = '';
     const projectDirectory = String(receiptRef.current.projectDirectory || '');
     let hostCalled = false;
+    let submittedPublishId = '';
     try {
       const currentFingerprint = await publicationFingerprint();
       if (!draftMatches || receiptSourceFingerprint !== currentFingerprint) {
@@ -1330,6 +1360,7 @@ export function StickerPage({
       });
       hostCalled = true;
       const result = await api.wechat.publish({ accountId, mediaId });
+      submittedPublishId = result.publishId;
       await persistDraftReceipt(dir, projectDirectory, {
         accountId,
         mediaId,
@@ -1348,7 +1379,13 @@ export function StickerPage({
         await persistDraftReceipt(dir, projectDirectory, { accountId, mediaId, state: 'draft', error: null }).catch(() => {});
         notify('发布已取消，草稿仍保留。', 'info');
       } else {
-        await persistDraftReceipt(dir, projectDirectory, { accountId, mediaId, state: 'unknown', error: message }).catch(() => {});
+        await persistDraftReceipt(dir, projectDirectory, {
+          accountId,
+          mediaId,
+          state: 'unknown',
+          publishId: submittedPublishId || null,
+          error: message,
+        }).catch(() => {});
         notify('发布结果未知：' + message + '。请先查询状态，不要重复提交。', 'danger');
       }
     } finally {
@@ -1359,6 +1396,10 @@ export function StickerPage({
   async function queryStatus(id = publishId) {
     const dir = directory;
     if (!dir || (!id && !mediaId)) return;
+    if (receiptDelivery !== 'image') {
+      notify('当前回执属于图文草稿，请在文章项目中查询。', 'warning');
+      return;
+    }
     const receiptAccountId = String(receipt.accountId || accountId);
     const projectDirectory = String(receipt.projectDirectory || '');
     setPublishBusy(true);
@@ -1659,10 +1700,11 @@ export function StickerPage({
           {publishId ? <div className="receipt"><span>发布标识</span><code>{publishId}</code></div> : null}
           {receipt.error ? <div className="notice warning">{String(receipt.error)}</div> : null}
           {mediaId && fingerprintReady && !draftMatches && receipt.articleFingerprint ? <div className="notice warning">图片消息草稿创建后贴图、标题、说明文字或配文已变化，请重新创建草稿。</div> : null}
+          {newsReceiptConflict ? <div className="notice danger">当前回执属于图文草稿。贴图工作流不会覆盖它，请回到文章项目处理。</div> : null}
           {draftBlocked ? (
             <div className="notice warning">
               {draftBlockedReason}插件不会自动重发。
-              <Button type="button" busy={publishBusy} disabled={operationBusy && !publishBusy} onClick={() => void resetUnknownState()}>
+              <Button type="button" busy={publishBusy} disabled={newsReceiptConflict || (operationBusy && !publishBusy)} onClick={() => void resetUnknownState()}>
                 {draftState === 'failed' ? '我已核对，重置失败状态' : '我已核对，重置未知状态'}
               </Button>
             </div>
@@ -1678,13 +1720,13 @@ export function StickerPage({
             <Button type="button" onClick={() => void saveToArticleProject()} busy={savingProject} disabled={!items.length || planIssues.length > 0 || generatedCount !== items.length || operationBusy}>
               保存到文章项目
             </Button>
-            <Button type="button" variant="primary" onClick={() => void createDraft()} busy={publishBusy} disabled={!publishReady || !accountId || draftBlocked || !draftEnabled || !fingerprintReady || operationBusy || Boolean(mediaId && draftMatches)}>
+            <Button type="button" variant="primary" onClick={() => void createDraft()} busy={publishBusy} disabled={newsReceiptConflict || !publishReady || !accountId || draftBlocked || !draftEnabled || !fingerprintReady || operationBusy || Boolean(mediaId && draftMatches)}>
               {!fingerprintReady ? '正在核对方案' : mediaId && draftMatches ? '当前方案已有图片消息草稿' : '创建图片消息草稿'}
             </Button>
-            <Button type="button" onClick={() => void publish()} busy={publishBusy} disabled={!mediaId || Boolean(publishId) || draftBlocked || !draftMatches || publishMethod !== 'published' || operationBusy}>
+            <Button type="button" onClick={() => void publish()} busy={publishBusy} disabled={newsReceiptConflict || !mediaId || Boolean(publishId) || draftBlocked || !draftMatches || publishMethod !== 'published' || operationBusy}>
               提交直接发布
             </Button>
-            <Button type="button" onClick={() => void queryStatus()} busy={publishBusy} disabled={(!publishId && !(mediaId && ['submitting', 'unknown', 'submitted', 'pending', 'failed'].includes(draftState))) || operationBusy}>
+            <Button type="button" onClick={() => void queryStatus()} busy={publishBusy} disabled={newsReceiptConflict || (!publishId && !(mediaId && ['submitting', 'unknown', 'submitted', 'pending', 'failed'].includes(draftState))) || operationBusy}>
               查询发布状态
             </Button>
           </div>

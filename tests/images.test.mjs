@@ -9,6 +9,7 @@ import {
   coverCopy,
   coverDescription,
   bodyDescription,
+  imagePlanSignature,
   mapGeneratedFiles,
   planImages,
   rewriteCoverImageMarker,
@@ -37,6 +38,17 @@ test('medium follows content before preferred tone', () => {
   assert.equal(chooseMedium({}, {}, '运行 npm 命令时出现报错'), '终端等宽');
   assert.equal(chooseMedium({}, {}, '逐条评测和拆解'), '打印稿批注');
   assert.equal(chooseMedium({}, {}, '这是一篇个人随笔'), '牛皮纸圆珠笔');
+});
+
+test('image plan signature changes when a prompt or aspect changes', () => {
+  const plan = planImages(article, {}, { title: '配置一次', cover_image_style: '纯色大字' });
+  const signature = imagePlanSignature(plan);
+  const changed = structuredClone(plan);
+  changed.items[0].prompt += ' 新要求';
+  assert.notEqual(imagePlanSignature(changed), signature);
+  const resized = structuredClone(plan);
+  resized.cover.aspect = '1:1';
+  assert.notEqual(imagePlanSignature(resized), signature);
 });
 
 const article = `# 配置一次，规矩自动加载

@@ -3,6 +3,7 @@ import { api, errorText, isMissingError, readOptional, shortId } from './client'
 import { Badge, Button, CopyButton, Empty, Field, Modal, Tabs } from './common';
 import { callWorker } from './worker-client';
 import { McpPanel } from './McpPanel';
+import { editorDraftLabel, useEditorDraft, type EditorDraftStatus } from './editor-draft';
 import { buildBlockFixPrompt, buildReviewPrompt, buildTopicPrompt, buildWritingPrompt } from '../lib/prompts.mjs';
 import { checkDraft, extractBoldOutline, stripCitations } from '../lib/writing.mjs';
 import {
@@ -13,9 +14,12 @@ import {
 } from '../lib/review.mjs';
 import { acceptsBlockFixFinish, applyBlockFix } from '../lib/review-fix.mjs';
 import {
+  articleDraftMatches,
   articlePublicationFingerprint,
   buildPublicationGate,
   hasSavedCover,
+  publicationReceiptDelivery,
+  publicationReceiptConflictsWithNews,
   reviewIssueStage,
 } from '../lib/publication.mjs';
 import {
@@ -26,6 +30,7 @@ import {
   coverCopy,
   coverDescription,
   chooseMedium,
+  imagePlanSignature,
   mapGeneratedFiles,
   planImages,
   rewriteCoverImageMarker,
@@ -41,9 +46,11 @@ import {
   deleteProjectDirectory,
   invalidateDerivedProjectFiles,
   loadProject,
+  markPublicationStale,
   nextStage,
   previousStage,
   saveArticle,
+  saveProjectTopic,
   saveStage,
   stageProgress,
 } from '../lib/project.mjs';
@@ -98,6 +105,12 @@ const PROJECT_FILES = [
   'review.md', 'article.md', 'article.html', 'stage-log.md',
 ];
 const DOWNSTREAM_STAGES = new Set(['format', 'images', 'final', 'publish']);
+const STAGE_GROUPS = [
+  { id: 'plan', label: '策划', stages: ['topic', 'research'] },
+  { id: 'write', label: '写作', stages: ['writing', 'review'] },
+  { id: 'produce', label: '制作', stages: ['format', 'images', 'final'] },
+  { id: 'publish', label: '发布核对', stages: ['publish'] },
+];
 
 function reviewSourceFor(project: ArticleProject, phase: 'review' | 'downstream' = 'review') {
   const hasDraft = Array.isArray(project.entries)
@@ -130,6 +143,7 @@ export function ProjectsPage({
   onOpen,
   onClose,
   onReload,
+  onRefresh,
   onChanged,
   onGoConfig,
 }: {
@@ -146,6 +160,7 @@ export function ProjectsPage({
   onOpen: (directory: string) => void;
   onClose: () => void;
   onReload: () => Promise<void>;
+  onRefresh: () => Promise<void>;
   onChanged: () => Promise<void>;
   onGoConfig: () => void;
 }) {
@@ -177,7 +192,7 @@ export function ProjectsPage({
             <h1>文章项目</h1>
             <p>每个项目对应 drafts/ 下的一个目录，外部修改后可以重新加载。</p>
           </div>
-          <Button type="button" onClick={() => void onReload()}>刷新</Button>
+          <Button type="button" onClick={() => void onRefresh()}>刷新</Button>
         </header>
         {projects.length ? (
           <div className="project-grid">
@@ -277,6 +292,7 @@ function ProjectWorkspace({
   }, [metaPanelOpen, pendingMetaFocus]);
 
   const progress = stageProgress(project.pipeline);
+  const activeGroup = STAGE_GROUPS.find(group => group.stages.includes(active)) || STAGE_GROUPS[0];
   const wordCount = checkDraft(reviewSourceFor(project), config).metrics.words;
   const fileFacts = useMemo(() => PROJECT_FILES.map(file => ({
     file,
@@ -366,20 +382,42 @@ function ProjectWorkspace({
         </div>
       </header>
 
-      <div className="stage-rail" aria-label="创作阶段">
-        {progress.map((stage, index) => (
-          <button
-            type="button"
-            key={stage.id}
-            className={['stage-step', stage.current ? 'current' : '', stage.completed ? 'completed' : '', active === stage.id ? 'viewing' : ''].filter(Boolean).join(' ')}
-            onClick={() => void goStage(stage.id)}
-            aria-current={active === stage.id ? 'step' : undefined}
-          >
-            <span>{stage.completed ? '✓' : index + 1}</span>
-            <strong>{stage.label}</strong>
-          </button>
-        ))}
-      </div>
+      <nav className="phase-rail" aria-label="创作阶段">
+        {STAGE_GROUPS.map((group, index) => {
+          const stages = group.stages.map(id => progress.find(stage => stage.id === id)).filter(Boolean) as any[];
+          const completed = stages.length > 0 && stages.every(stage => stage.completed);
+          const current = stages.some(stage => stage.current);
+          const viewing = group.id === activeGroup.id;
+          return (
+            <button
+              type="button"
+              key={group.id}
+              className={['phase-step', completed ? 'completed' : '', current ? 'current' : '', viewing ? 'viewing' : ''].filter(Boolean).join(' ')}
+              onClick={() => void goStage(viewing ? active : group.stages.find(id => !progress.find(stage => stage.id === id)?.completed) || group.stages[0])}
+              aria-current={viewing ? 'step' : undefined}
+            >
+              <span>{completed ? '✓' : index + 1}</span>
+              <strong>{group.label}</strong>
+            </button>
+          );
+        })}
+      </nav>
+      <nav className="phase-subnav" aria-label={activeGroup.label + '阶段'}>
+        {activeGroup.stages.map(stageId => {
+          const stage = progress.find(item => item.id === stageId);
+          return (
+            <button
+              type="button"
+              key={stageId}
+              className={active === stageId ? 'active' : ''}
+              onClick={() => void goStage(stageId)}
+              aria-pressed={active === stageId}
+            >
+              {stage?.completed ? '✓ ' : ''}{STAGE_LABELS[stageId]}
+            </button>
+          );
+        })}
+      </nav>
 
       <div className="project-context">
         <div className="project-context-summary">
@@ -486,7 +524,14 @@ function MetaEditor({
   async function save() {
     setBusy(true);
     try {
+      const titleChanged = title !== project.article.title;
+      const metadataChanged = titleChanged || digest !== project.article.digest || author !== project.article.author;
       await saveArticle(api, project.directory, { title, author, digest });
+      if (titleChanged) {
+        await invalidateDerivedProjectFiles(api, project.directory, { fromStage: 'review' });
+      } else if (metadataChanged) {
+        await markPublicationStale(api, project.directory, { reason: 'metadata-changed' });
+      }
       await onChanged();
       await onReload();
       notify('文章元数据已保存。', 'success');
@@ -529,6 +574,44 @@ function ResultEditor({ value, onChange, rows = 14, label = '生成结果' }: { 
   );
 }
 
+type DraftController = {
+  status: EditorDraftStatus;
+  discard: () => Promise<void>;
+};
+
+function EditorDraftNotice({ draft, extra }: { draft: DraftController; extra?: DraftController }) {
+  const statuses = [draft.status, extra?.status].filter(Boolean) as EditorDraftStatus[];
+  const restored = statuses.some(item => item.phase === 'restored');
+  const failed = statuses.find(item => item.phase === 'error');
+  const saving = statuses.some(item => item.phase === 'saving');
+  const saved = statuses.some(item => item.phase === 'saved');
+  if (!restored && !failed && !saving && !saved) return null;
+  return (
+    <div className={'editor-draft-notice' + (failed ? ' danger' : restored ? ' restored' : '')} role="status">
+      <span>
+        {failed
+          ? editorDraftLabel(failed)
+          : restored
+            ? '已恢复上次未保存的草稿；确认保存前不会覆盖项目文件。'
+            : saving
+              ? '正在保存本地草稿…'
+              : '本地草稿已保存'}
+      </span>
+      {restored ? (
+        <button
+          type="button"
+          className="editor-draft-discard"
+          onClick={() => {
+            void Promise.all([draft.discard(), extra?.discard()]);
+          }}
+        >
+          丢弃恢复内容
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
 function isTimeoutError(error: unknown) {
   return /timeout|timed out|operation was aborted|超时|AbortError/i.test(errorText(error))
     || ['TimeoutError', 'AbortError'].includes(String((error as any)?.name || ''));
@@ -562,12 +645,16 @@ function TopicStage({
   project: ArticleProject; config: Record<string, any>; servers: McpServer[]; modelId: string; notify: Notify;
   onSaved: () => void; onNext: () => void;
 }) {
-  const [value, setValue] = useState(project.files.topic || '');
+  const draft = useEditorDraft({
+    directory: project.directory,
+    stage: 'topic',
+    initialValue: project.files.topic || '',
+  });
+  const { value, setValue } = draft;
   const [notes, setNotes] = useState('');
-  const [topic, setTopic] = useState(String(project.pipeline.source || project.article.title || ''));
+  const [topic, setTopic] = useState(String(project.pipeline.topic || project.pipeline.source || project.article.title || ''));
   const [series, setSeries] = useState(false);
   const [busy, setBusy] = useState(false);
-  useEffect(() => setValue(project.files.topic || ''), [project.directory, project.files.topic]);
 
   async function generate() {
     setBusy(true);
@@ -585,10 +672,12 @@ function TopicStage({
     setBusy(true);
     try {
       await api.workspace.writeText({ path: project.directory + '/topic-card.md', text: value, overwrite: true });
+      await saveProjectTopic(api, project.directory, topic);
       if (series) {
         const slug = String(topic || project.article.title || 'series').replace(/[^\u3400-\u9fffA-Za-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'series';
         await api.workspace.writeText({ path: 'series/' + slug + '/plan.md', text: value, overwrite: true });
       }
+      await draft.markSaved();
       next ? onNext() : onSaved();
     } catch (error) {
       notify(errorText(error), 'danger');
@@ -599,7 +688,7 @@ function TopicStage({
 
   return (
     <div>
-      <StageHeader title="选题" description="默认需要 4–6 次搜索和 2–3 篇深读。没有可用 MCP 时可跳过调研或手工提供资料。" />
+      <StageHeader title="选题" description="先收敛一个方向并为后续写作留下依据；确认后再进入调研。" />
       <div className="form-grid">
         <Field label="方向或既定话题"><input value={topic} onChange={event => setTopic(event.target.value)} /></Field>
         <Field label="系列模式">
@@ -619,6 +708,7 @@ function TopicStage({
         <Button type="button" variant="primary" onClick={() => void generate()} busy={busy}>生成 3–5 个选题卡</Button>
       </div>
       <ResultEditor value={value} onChange={setValue} rows={22} label="选题卡" />
+      <EditorDraftNotice draft={draft} />
       <div className="toolbar toolbar-end">
         <Button type="button" onClick={() => void save(false)} busy={busy}>仅保存</Button>
         <Button type="button" variant="primary" onClick={() => void save(true)} busy={busy}>确认选题，进入调研</Button>
@@ -633,18 +723,30 @@ function ResearchStage({
   project: ArticleProject; config: Record<string, any>; servers: McpServer[]; modelId: string; notify: Notify;
   onSaved: () => void; onNext: () => void;
 }) {
-  const [topic, setTopic] = useState(project.files.topic || '');
-  const [value, setValue] = useState(project.files.research || '');
+  const topicDraft = useEditorDraft({
+    directory: project.directory,
+    stage: 'research-topic',
+    initialValue: String(project.pipeline.topic || project.files.topic || ''),
+    baseline: String(project.pipeline.topic || project.files.topic || ''),
+  });
+  const draft = useEditorDraft({
+    directory: project.directory,
+    stage: 'research',
+    initialValue: project.files.research || '',
+  });
+  const topic = topicDraft.value;
+  const setTopic = topicDraft.setValue;
+  const { value, setValue } = draft;
   const [busy, setBusy] = useState(false);
-  useEffect(() => {
-    setTopic(project.files.topic || '');
-    setValue(project.files.research || '');
-  }, [project.directory, project.files.topic, project.files.research]);
 
   async function save(next: boolean) {
     setBusy(true);
     try {
       await api.workspace.writeText({ path: project.directory + '/research.md', text: value, overwrite: true });
+      await api.workspace.writeText({ path: project.directory + '/topic-card.md', text: topic, overwrite: true });
+      await saveProjectTopic(api, project.directory, topic);
+      await draft.markSaved();
+      await topicDraft.markSaved();
       next ? onNext() : onSaved();
     } catch (error) {
       notify(errorText(error), 'danger');
@@ -655,7 +757,7 @@ function ResearchStage({
 
   return (
     <div>
-      <StageHeader title="调研" description="记录来源 URL、可用事实和争议点。没有工具时可以跳过，或把已有资料粘贴到下面的编辑器。" />
+      <StageHeader title="调研" description="记录来源、可用事实和争议点；也可以直接粘贴已有资料。" />
       <Field label="已确认的选题"><textarea value={topic} onChange={event => setTopic(event.target.value)} rows={5} /></Field>
       <McpPanel
         servers={servers}
@@ -664,6 +766,7 @@ function ResearchStage({
         onResult={content => setValue(current => current + '\n\n' + (typeof content === 'string' ? content : JSON.stringify(content, null, 2)))}
       />
       <ResultEditor value={value} onChange={setValue} rows={24} label="research.md" />
+      <EditorDraftNotice draft={draft} extra={topicDraft} />
       <div className="toolbar toolbar-end">
         <Button type="button" onClick={() => void save(false)} busy={busy}>仅保存</Button>
         <Button type="button" variant="primary" onClick={() => void save(true)} busy={busy}>确认调研，进入写稿</Button>
@@ -730,15 +833,30 @@ function WritingStage({
   project: ArticleProject; config: Record<string, any>; modelId: string; notify: Notify;
   onSaved: () => void; onNext: () => void;
 }) {
-  const [value, setValue] = useState(reviewSourceFor(project));
+  const initialWriting = reviewSourceFor(project);
+  const draft = useEditorDraft({
+    directory: project.directory,
+    stage: 'writing',
+    initialValue: initialWriting,
+    baseline: initialWriting,
+  });
+  const { value, setValue } = draft;
   const [busy, setBusy] = useState(false);
   const [spec, setSpec] = useState('');
   const [check, setCheck] = useState<any>(null);
+  const checkRevision = useRef(0);
   useEffect(() => {
-    setValue(reviewSourceFor(project));
     void readOptional('.aws-article/writing-spec.md').then(setSpec);
-    void callWorker('check', { markdown: reviewSourceFor(project), config }).then(setCheck).catch(() => {});
-  }, [project.directory, project.files.writing, project.files.format, project.entries, config]);
+  }, [project.directory]);
+  useEffect(() => {
+    const revision = ++checkRevision.current;
+    const timer = window.setTimeout(() => {
+      void callWorker('check', { markdown: value, config }).then(result => {
+        if (revision === checkRevision.current) setCheck(result);
+      }).catch(() => {});
+    }, 320);
+    return () => window.clearTimeout(timer);
+  }, [config, value]);
 
   async function generate() {
     setBusy(true);
@@ -779,6 +897,7 @@ function WritingStage({
       setCheck(result);
       await api.workspace.writeText({ path: project.directory + '/draft.md', text: value, overwrite: true });
       await invalidateDerivedProjectFiles(api, project.directory);
+      await draft.markSaved();
       if (next) onNext(); else onSaved();
     } catch (error) {
       notify(errorText(error), 'danger');
@@ -789,11 +908,12 @@ function WritingStage({
 
   return (
     <div>
-      <StageHeader title="写稿" description="复刻上游提示词、结构配额、摘要导语、加粗落点、金句卡和引用标注。" />
+      <StageHeader title="写稿" description="生成或改写初稿。编辑内容会自动保存为本地草稿，确认后才写入项目并让下游检查过期。" />
       <div className="toolbar toolbar-end">
         <Button type="button" variant="primary" onClick={() => void generate()} busy={busy}>按配置生成 / 改写</Button>
       </div>
       <ResultEditor value={value} onChange={setValue} rows={28} label="draft.md" />
+      <EditorDraftNotice draft={draft} />
       {check ? <WritingCheck check={check} /> : null}
       <div className="toolbar toolbar-end">
         <Button type="button" onClick={() => void save(false)} busy={busy}>仅保存</Button>
@@ -812,8 +932,8 @@ function WritingCheck({ check }: { check: any }) {
         <span><strong>{check.metrics.bolds}</strong> 处加粗</span>
         <span><strong>{check.metrics.quoteCards}</strong> 金句卡</span>
       </div>
-      {check.issues.length ? <ul>{check.issues.map((item: string) => <li key={item}>{item}</li>)}</ul> : <p>结构硬性项已通过。</p>}
-      {check.warnings.length ? <details><summary>提醒事项</summary><ul>{check.warnings.map((item: string) => <li key={item}>{item}</li>)}</ul></details> : null}
+      {check.issues.length ? <ul>{check.issues.map((item: string) => <li key={item}>{item}</li>)}</ul> : <p>发布硬限制已通过；账号偏好见下方提醒。</p>}
+      {check.warnings.length ? <div className="check-warnings"><strong>账号写作偏好（不阻断）</strong><ul>{check.warnings.map((item: string) => <li key={item}>{item}</li>)}</ul></div> : null}
       {check.outline.length ? <details><summary>只读加粗提要</summary><p>{check.outline.join(' / ')}</p></details> : null}
     </div>
   );
@@ -826,27 +946,35 @@ function ReviewStage({
   onSaved: () => void; onNext: () => void; onReload: () => Promise<void>;
 }) {
   const [result, setResult] = useState<any>(null);
-  const [aiValue, setAiValue] = useState(project.files.review || '');
+  const draft = useEditorDraft({
+    directory: project.directory,
+    stage: 'review',
+    initialValue: project.files.review || '',
+  });
+  const { value: aiValue, setValue: setAiValue, hydrated: draftHydrated } = draft;
   const [busy, setBusy] = useState(false);
   const [fixMessage, setFixMessage] = useState<{ text: string; tone: 'info' | 'warning' | 'danger' } | null>(null);
 
   const reviewDirectory = useRef(project.directory);
   const reviewSource = useRef(reviewSourceFor(project));
 
-  function runLocal() {
+  function runLocal(preserveDraft = false) {
     const source = reviewSourceFor(project);
     const changed = reviewDirectory.current !== project.directory || reviewSource.current !== source;
     reviewDirectory.current = project.directory;
     reviewSource.current = source;
     const review = reviewArticle(source, config, { title: project.article.title });
     setResult(review);
-    setAiValue(current => mergeReviewMarkdown(formatReviewMarkdown(review), changed ? '' : aiReviewSupplement(current)));
+    if (!preserveDraft) {
+      setAiValue(current => mergeReviewMarkdown(formatReviewMarkdown(review), changed ? '' : aiReviewSupplement(current)));
+    }
     return review;
   }
   useEffect(() => {
-    runLocal();
+    if (!draftHydrated) return;
+    runLocal(draft.status.phase !== 'idle');
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [project.directory, project.files.writing, project.files.format, project.entries, project.article.title, config]);
+  }, [draftHydrated, project.directory, project.files.writing, project.files.format, project.entries, project.article.title, config]);
 
   async function aiReview() {
     setBusy(true);
@@ -961,6 +1089,7 @@ function ReviewStage({
       setResult(applied.fixed.review);
       reviewSource.current = applied.fixed.markdown;
       setAiValue(String(applied.reviewText || formatReviewMarkdown(applied.fixed.review)));
+      await draft.markSaved();
       setFixMessage({ text: 'AI 已处理 ' + blockers.length + ' 个阻断项，本地复检通过。现在可以进入排版。', tone: 'info' });
       notify('阻断项已清除，可以进入排版。', 'success');
       await onReload();
@@ -984,11 +1113,13 @@ function ReviewStage({
         const reviewText = mergeReviewMarkdown(formatReviewMarkdown(review), aiReviewSupplement(aiValue));
         await api.workspace.writeText({ path: project.directory + '/review.md', text: reviewText, overwrite: true });
         await invalidateDerivedProjectFiles(api, project.directory, { includeReview: false });
+        await draft.markSaved();
         onNext();
         return;
       }
       const review = runLocal();
       await api.workspace.writeText({ path: project.directory + '/review.md', text: aiValue || formatReviewMarkdown(review), overwrite: true });
+      await draft.markSaved();
       onSaved();
     } catch (error) {
       notify(errorText(error), 'danger');
@@ -998,7 +1129,7 @@ function ReviewStage({
   }
   return (
     <div>
-      <StageHeader title="内容审" description="分为阻断、警告、建议。AI 味 15 类指纹只作为建议，不阻断定稿。">
+      <StageHeader title="内容审" description="平台限制必须处理；账号写作偏好可以保留原文；AI 审稿只作补充。">
         <Button type="button" onClick={() => { setFixMessage(null); runLocal(); }}>重新检测</Button>
       </StageHeader>
       {result ? <ReviewSummary review={result} /> : null}
@@ -1007,6 +1138,7 @@ function ReviewStage({
         <Button type="button" onClick={() => void aiReview()} busy={busy}>补充 AI 审稿意见</Button>
       </div>
       <ResultEditor value={aiValue} onChange={setAiValue} rows={22} label="review.md" />
+      <EditorDraftNotice draft={draft} />
       <div className="toolbar toolbar-end">
         <Button type="button" onClick={() => void save(false)} busy={busy}>仅保存</Button>
         <Button type="button" variant={result && !result.ok ? 'primary' : 'secondary'} onClick={() => void fixBlocks()} busy={busy} disabled={!result || result.ok}>处理阻断</Button>
@@ -1027,6 +1159,9 @@ function ReviewSummary({ review, fixFor }: {
         <Badge tone={review.counts.warning ? 'warning' : 'neutral'}>警告 {review.counts.warning}</Badge>
         <Badge tone="neutral">建议 {review.counts.suggestion}</Badge>
       </div>
+      <p className="review-legend">
+        阻断＝平台与发布限制，必须处理；警告＝账号写作偏好，可以保留原文；建议＝可选优化。
+      </p>
       {review.issues.length ? (
         <div className="issue-list">
           {review.issues.map((item: any, index: number) => {
@@ -1127,9 +1262,14 @@ function FormatStage({
   const initialFormat = resolveFormatOptions(config, project.article);
   const coverImage = hasSavedCover(project) ? String(project.article.cover_image || '').trim() : '';
   const withCover = (value: string) => rewriteCoverImageMarker(value, coverImage, { insert: true, invalid: 'placeholder' });
-  const [markdown, setMarkdown] = useState(() => withCover(
-    project.files.format || project.files.writing || project.files.research || '',
-  ));
+  const initialMarkdown = withCover(project.files.format || project.files.writing || project.files.research || '');
+  const draft = useEditorDraft({
+    directory: project.directory,
+    stage: 'format',
+    initialValue: initialMarkdown,
+    baseline: initialMarkdown,
+  });
+  const { value: markdown, setValue: setMarkdown } = draft;
   const [theme, setTheme] = useState(initialFormat.theme);
   const [scheme, setScheme] = useState(initialFormat.scheme);
   const [html, setHtml] = useState(project.files.html || '');
@@ -1146,11 +1286,6 @@ function FormatStage({
       previewTrigger.current = null;
     }
   }, [previewZoom]);
-
-  useEffect(() => {
-    if (!coverImage) return;
-    setMarkdown(current => withCover(current));
-  }, [coverImage]);
 
   useEffect(() => {
     const themeValue = themeSummaries.find((item: any) => item.name === theme);
@@ -1220,12 +1355,18 @@ function FormatStage({
     try {
       const value = await render(false);
       if (!value) return;
+      const contentChanged = value.markdown !== (project.files.format || '')
+        || value.html !== (project.files.html || '');
       await saveArticle(api, project.directory, {
         default_format_preset: [theme],
         default_format_scheme: scheme ? [scheme] : [],
       });
       await api.workspace.writeText({ path: project.directory + '/article.md', text: value.markdown, overwrite: true });
       await api.workspace.writeText({ path: project.directory + '/article.html', text: value.html, overwrite: true });
+      if (contentChanged) {
+        await markPublicationStale(api, project.directory, { reason: 'format-changed' });
+      }
+      await draft.markSaved();
       next ? onNext() : onSaved();
     } catch (error) {
       notify(errorText(error), 'danger');
@@ -1263,6 +1404,7 @@ function FormatStage({
             <span className="field-label source-heading"><span>正文编辑</span><code>article.md</code></span>
             <textarea className="article-input" value={markdown} onChange={event => setMarkdown(event.target.value)} rows={24} spellCheck={false} />
           </label>
+          <EditorDraftNotice draft={draft} />
           <div className="toolbar toolbar-end">
             <Button type="button" onClick={() => void render(true)} busy={busy}>更新预览</Button>
             <CopyButton text={html} label="复制 HTML" />
@@ -1324,6 +1466,9 @@ function ImagesStage({
   const [previews, setPreviews] = useState<PreviewImage[]>([]);
   const [statuses, setStatuses] = useState<Record<string, ImageTargetStatus>>({});
   const [generatingKey, setGeneratingKey] = useState('');
+  const batchPlanSignature = useRef('');
+  const planRef = useRef<any>(null);
+  planRef.current = plan;
   const [preview, setPreview] = useState<(PreviewImage & { url: string }) | null>(null);
   const mcpAbort = useRef<AbortController | null>(null);
   const generatedMapping = useRef<Record<number, string>>({});
@@ -1632,6 +1777,7 @@ function ImagesStage({
         cover_copy: coverCopyText.trim(),
         body_copies: bodyCopies,
       });
+      await markPublicationStale(api, project.directory, { reason: 'images-changed' });
     } catch (error) {
       if (previousMarkdown) await api.workspace.writeText({ path: project.directory + '/article.md', text: previousMarkdown, overwrite: true }).catch(() => {});
       else await api.workspace.remove({ path: project.directory + '/article.md' }).catch(() => {});
@@ -1763,6 +1909,12 @@ function ImagesStage({
       notify(imageGenerator === 'mcp' ? '请先完成 MCP 生图配置。' : '请选择图片模型。', 'warning');
       return;
     }
+    const currentPlanSignature = imagePlanSignature(planRef.current || plan);
+    if (action === 'retry' && batchPlanSignature.current && batchPlanSignature.current !== currentPlanSignature) {
+      notify('生成期间图片方案已变化，不能复用旧批次重试。请按当前方案重新生成。', 'warning');
+      return;
+    }
+    batchPlanSignature.current = currentPlanSignature;
     setStatuses({});
     if (imageGenerator === 'mcp') {
       if (!config.mcp_image_server || !config.mcp_image_tool || !mcpReady) {
@@ -2172,6 +2324,7 @@ function ImagesStage({
       await api.workspace.writeText({ path: project.directory + '/article.md', text: rewritten, overwrite: true });
       await api.workspace.writeText({ path: project.directory + '/article.html', text: rendered.html, overwrite: true });
       setPreviews(current => [{ path: coverPath, title: '封面', kind: 'cover' }, ...current.filter(item => item.kind !== 'cover')]);
+      await markPublicationStale(api, project.directory, { reason: 'images-changed' });
       await onReload().catch(() => {});
       setMessage('封面已保存。请检查手机预览中的裁切效果。');
       notify('已使用你提供的封面。', 'success');
@@ -2242,6 +2395,7 @@ function ImagesStage({
       });
       generatedMapping.current = mapping;
       setPreviews(previewsFromMapping(mapping));
+      await markPublicationStale(api, project.directory, { reason: 'images-changed' });
       await onReload().catch(() => {});
       const missing = Math.max(0, plan.items.length - Object.keys(mapping).length);
       setMessage(missing ? '已导入 ' + files.length + ' 张，仍有 ' + missing + ' 个图位缺少图片。' : '正文图片已写入并更新文章。');
@@ -2266,6 +2420,9 @@ function ImagesStage({
   }
 
   async function applyBatch(value: any, outputPath: string) {
+    if (batchPlanSignature.current && batchPlanSignature.current !== imagePlanSignature(planRef.current || plan)) {
+      throw new Error('生成期间图片方案已变化，旧批次结果不会写回新图位。请按当前方案重新生成。');
+    }
     setMessage('正在整理图片文件…');
     if (!outputPath) throw new Error('图片批次输出目录缺失。');
     const entries = await api.workspace.list({ path: outputPath, recursive: false });
@@ -2342,6 +2499,7 @@ function ImagesStage({
         cover_copy: coverCopyText.trim(),
         body_copies: bodyCopies,
       });
+      await markPublicationStale(api, project.directory, { reason: 'images-changed' });
       for (const entry of generated) await api.workspace.remove({ path: entry.path }).catch(() => {});
     } catch (error) {
       if (previousMarkdown) await api.workspace.writeText({ path: project.directory + '/article.md', text: previousMarkdown, overwrite: true }).catch(() => {});
@@ -2373,6 +2531,7 @@ function ImagesStage({
 
   async function saveSelection() {
     const patch: Record<string, any> = {};
+    let changed = false;
     if (coverImageStyle && coverImageStyle !== String(project.article.cover_image_style || '').trim()) {
       patch.cover_image_style = coverImageStyle;
     }
@@ -2390,8 +2549,12 @@ function ImagesStage({
     if (JSON.stringify(cleanBodyCopies) !== JSON.stringify(project.article.body_copies || {})) {
       patch.body_copies = cleanBodyCopies;
     }
-    if (Object.keys(patch).length) await saveArticle(api, project.directory, patch);
+    if (Object.keys(patch).length) {
+      await saveArticle(api, project.directory, patch);
+      changed = true;
+    }
     if (plan) {
+      if (JSON.stringify(generatedMapping.current) !== JSON.stringify(plan.generated || {})) changed = true;
       await api.workspace.writeText({
         path: project.directory + '/img-plan.json',
         text: JSON.stringify({ ...plan, generated: generatedMapping.current }, null, 2),
@@ -2402,10 +2565,14 @@ function ImagesStage({
         invalidCover: 'placeholder',
       });
       if (rewritten !== baseMarkdown) {
+        changed = true;
         const rendered = await renderArticle(rewritten);
         await api.workspace.writeText({ path: project.directory + '/article.md', text: rewritten, overwrite: true });
         await api.workspace.writeText({ path: project.directory + '/article.html', text: rendered.html, overwrite: true });
       }
+    }
+    if (changed) {
+      await markPublicationStale(api, project.directory, { reason: 'images-changed' });
     }
   }
 
@@ -2423,6 +2590,7 @@ function ImagesStage({
   const coverTarget: ImageTarget = { kind: 'cover' };
   const coverPreview = previewForTarget(coverTarget);
   const coverHasMedia = Boolean(plan?.cover?.generate || coverPreview) || imageSource === 'user';
+  const planControlsDisabled = planning || busy;
   const singleDisabled = !plan || planning || busy
     || (imageGenerator === 'model' ? !modelId : (!mcpReady || !config.mcp_image_tool));
 
@@ -2436,18 +2604,18 @@ function ImagesStage({
           </Field>
         ) : (
           <Field label="图片模型">
-            <select value={modelId} onChange={event => setModelId(event.target.value)}>
+            <select value={modelId} disabled={busy} onChange={event => setModelId(event.target.value)}>
               {imageModels.map(model => <option key={model.id} value={model.id}>{imageModelLabel(model)}</option>)}
             </select>
           </Field>
         )}
         <Field label="封面形态">
-          <select value={coverImageStyle || plan?.cover?.style || ''} onChange={event => setCoverImageStyle(event.target.value)}>
+          <select value={coverImageStyle || plan?.cover?.style || ''} disabled={busy} onChange={event => setCoverImageStyle(event.target.value)}>
             {COVER_STYLES.map(name => <option key={name} value={name}>{name}</option>)}
           </select>
         </Field>
         <Field label="本篇统一媒介">
-          <select value={medium || plan?.medium || ''} onChange={event => setMedium(event.target.value)}>
+          <select value={medium || plan?.medium || ''} disabled={busy} onChange={event => setMedium(event.target.value)}>
             {IMAGE_MEDIA.map(name => <option key={name} value={name}>{name}</option>)}
           </select>
         </Field>
@@ -2473,6 +2641,7 @@ function ImagesStage({
                     value={coverCopyText !== '' ? coverCopyText : plan.cover.copy}
                     placeholder="输入封面文案/压字"
                     aria-label="封面文案"
+                    disabled={planControlsDisabled}
                     onChange={event => handleCoverCopyChange(event.target.value)}
                   />
                   {Boolean(coverCopyText && coverCopyText !== (plan.cover.defaultCopy || coverCopy(plan.title))) ? (
@@ -2480,6 +2649,7 @@ function ImagesStage({
                       type="button"
                       className="plan-copy-reset"
                       title="恢复自动提炼文案"
+                      disabled={planControlsDisabled}
                       onClick={() => handleCoverCopyChange('')}
                     >
                       重置
@@ -2535,6 +2705,7 @@ function ImagesStage({
                         value={bodyCopies[item.index] ?? item.alt}
                         placeholder="输入配图文案或画面说明"
                         aria-label={'配图 ' + (item.index + 1) + ' 文案'}
+                        disabled={planControlsDisabled}
                         onChange={event => handleBodyCopyChange(item.index, event.target.value)}
                       />
                       {Boolean(bodyCopies[item.index] && bodyCopies[item.index].trim() !== (item.originalAlt || item.alt)) ? (
@@ -2542,6 +2713,7 @@ function ImagesStage({
                           type="button"
                           className="plan-copy-reset"
                           title="恢复图位原文说明"
+                          disabled={planControlsDisabled}
                           onClick={() => handleBodyCopyChange(item.index, '')}
                         >
                           重置
@@ -2816,17 +2988,31 @@ function PublishStage({
   });
   const gate = buildPublicationGate(project, review);
   const publishMethod = String(project.article.publish_method || config.publish_method || 'draft');
+  const publishSettings = useMemo(() => ({
+    needOpenComment: Boolean(project.article.need_open_comment ?? config.need_open_comment) ? 1 : 0,
+    onlyFansCanComment: Boolean(project.article.only_fans_can_comment ?? config.only_fans_can_comment) ? 1 : 0,
+  }), [
+    config.need_open_comment,
+    config.only_fans_can_comment,
+    project.article.need_open_comment,
+    project.article.only_fans_can_comment,
+  ]);
   const draftEnabled = publishMethod !== 'none';
   const draftState = String(receipt.state || '');
+  const receiptDelivery = publicationReceiptDelivery(receipt);
+  const deliveryMismatch = publicationReceiptConflictsWithNews(receipt);
   const draftBlocked = ['creating-draft', 'draft-unknown', 'submitting', 'unknown', 'failed'].includes(draftState);
-  const draftMatches = Boolean(
-    fingerprintReady
-    && mediaId
-    && receipt.mediaId === mediaId
-    && receipt.accountId === accountId
-    && receipt.articleFingerprint
-    && receipt.articleFingerprint === fingerprint,
-  );
+  const draftMatches = articleDraftMatches({
+    fingerprintReady,
+    stale: Boolean(receipt.stale),
+    delivery: receiptDelivery,
+    mediaId,
+    accountId,
+    receiptMediaId: String(receipt.mediaId || ''),
+    receiptAccountId: String(receipt.accountId || ''),
+    receiptFingerprint: String(receipt.articleFingerprint || ''),
+    fingerprint,
+  });
 
   useEffect(() => {
     if (!accounts.some(account => account.id === accountId)) setAccountId(accounts[0]?.id || '');
@@ -2846,7 +3032,7 @@ function PublishStage({
   useLayoutEffect(() => {
     let active = true;
     setFingerprintReady(false);
-    void articlePublicationFingerprint(project).then(value => {
+    void articlePublicationFingerprint(project, publishSettings).then(value => {
       if (active) {
         setFingerprint(value);
         setFingerprintReady(true);
@@ -2860,34 +3046,39 @@ function PublishStage({
     return () => {
       active = false;
     };
-  }, [project, notify]);
+  }, [project, notify, publishSettings]);
 
   async function persist(patch: Record<string, any>) {
-    const next: Record<string, any> = { ...receiptRef.current, ...patch, updatedAt: new Date().toISOString() };
+    const previous = receiptRef.current;
+    if (publicationReceiptConflictsWithNews(previous)) {
+      throw new Error('当前发布回执属于图片消息，文章发布页不能改写。请回到贴图工作流处理。');
+    }
+    const archive = patch.state === 'creating-draft'
+      && previous.mediaId
+      && previous.state !== 'creating-draft'
+      ? [{
+          accountId: previous.accountId,
+          mediaId: previous.mediaId,
+          publishId: previous.publishId,
+          state: previous.state,
+          delivery: previous.delivery || 'news',
+          articleFingerprint: previous.articleFingerprint,
+          archivedAt: new Date().toISOString(),
+          archivedReason: previous.stale ? 'upstream-changed' : 'replaced-by-new-draft',
+        }]
+      : [];
+    const history = archive.length
+      ? [...(Array.isArray(previous.history) ? previous.history : []), ...archive].slice(-10)
+      : previous.history;
+    const next: Record<string, any> = {
+      ...previous,
+      delivery: 'news',
+      ...patch,
+      ...(history ? { history } : {}),
+      updatedAt: new Date().toISOString(),
+    };
     const text = JSON.stringify(next, null, 2);
     await api.workspace.writeText({ path: project.directory + '/publish.json', text, overwrite: true });
-    const stickersDirectory = String(next.stickersDirectory || '');
-    if (stickersDirectory.startsWith('posts/stickers/') && !stickersDirectory.split('/').includes('..')) {
-      const stickerText = await readOptional(stickersDirectory + '/publish.json');
-      let stickerReceipt: Record<string, any> = {};
-      try {
-        stickerReceipt = stickerText ? JSON.parse(stickerText) : {};
-      } catch {
-        stickerReceipt = {};
-      }
-      const stickerNext = {
-        ...stickerReceipt,
-        ...patch,
-        projectDirectory: project.directory,
-        stickersDirectory,
-        updatedAt: next.updatedAt,
-      };
-      await api.workspace.writeText({
-        path: stickersDirectory + '/publish.json',
-        text: JSON.stringify(stickerNext, null, 2),
-        overwrite: true,
-      });
-    }
     receiptRef.current = next;
     setReceipt(next);
     if (next.mediaId !== undefined) setMediaId(String(next.mediaId || ''));
@@ -2951,13 +3142,18 @@ function PublishStage({
       notify('当前配置为只保存到本地，不会创建公众号草稿。', 'warning');
       return;
     }
+    if (deliveryMismatch) {
+      notify('当前发布记录属于公众号图片消息，不能作为图文草稿继续。请在贴图工作流中处理。', 'danger');
+      return;
+    }
     if (draftBlocked) {
       notify('上次草稿或发布状态未知，请先在公众号后台核对，再明确重置状态。', 'warning');
       return;
     }
     setBusy(true);
-    const currentFingerprint = fingerprint || await articlePublicationFingerprint(project);
+    const currentFingerprint = fingerprint || await articlePublicationFingerprint(project, publishSettings);
     let hostCalled = false;
+    let createdMediaId = '';
     try {
       const payload = wechatPayload();
       await persist({
@@ -2966,17 +3162,24 @@ function PublishStage({
         mediaId: null,
         publishId: null,
         state: 'creating-draft',
+        delivery: 'news',
+        stale: false,
+        staleReason: null,
         articleFingerprint: currentFingerprint,
         error: null,
       });
       hostCalled = true;
       const result = await api.wechat.createDraft(payload);
+      createdMediaId = result.mediaId;
       setMediaId(result.mediaId);
       await persist({
         accountId,
         mediaId: result.mediaId,
         publishId: null,
         state: 'draft',
+        delivery: 'news',
+        stale: false,
+        staleReason: null,
         title: project.article.title,
         articleFingerprint: currentFingerprint,
         error: null,
@@ -2984,14 +3187,28 @@ function PublishStage({
       await onSaved();
       notify('公众号草稿已创建。请先在后台核对，再决定是否发布。', 'success');
     } catch (error) {
-      const state = hostCalled ? 'draft-unknown' : 'draft-failed';
-      await persist({ state, error: errorText(error) }).catch(() => {});
-      notify(
-        hostCalled
-          ? '草稿创建结果不确定：' + errorText(error) + '。请先在公众号后台核对，避免重复创建。'
-          : '创建草稿前检查失败：' + errorText(error) + '。可修正后重试。',
-        'danger',
-      );
+      if (createdMediaId) {
+        await persist({
+          accountId,
+          mediaId: createdMediaId,
+          publishId: null,
+          state: 'draft',
+          delivery: 'news',
+          title: project.article.title,
+          articleFingerprint: currentFingerprint,
+          error: errorText(error),
+        }).catch(() => {});
+        notify('草稿已创建，但本地回执保存失败：' + errorText(error) + '。请立即核对当前页的 mediaId，避免重复创建。', 'danger');
+      } else {
+        const state = hostCalled ? 'draft-unknown' : 'draft-failed';
+        await persist({ state, error: errorText(error) }).catch(() => {});
+        notify(
+          hostCalled
+            ? '草稿创建结果不确定：' + errorText(error) + '。请先在公众号后台核对，避免重复创建。'
+            : '创建草稿前检查失败：' + errorText(error) + '。可修正后重试。',
+          'danger',
+        );
+      }
     } finally {
       setBusy(false);
     }
@@ -3010,6 +3227,10 @@ function PublishStage({
       notify('上次发布结果未知，请先查询状态或在公众号后台核对，禁止重复提交。', 'warning');
       return;
     }
+    if (deliveryMismatch) {
+      notify('当前记录属于图片消息，不能从文章发布页提交。', 'danger');
+      return;
+    }
     const latestReview = reviewArticle(project.files.format || project.files.writing, config, {
       html: project.files.html,
       title: project.article.title,
@@ -3022,8 +3243,9 @@ function PublishStage({
     }
     setBusy(true);
     let hostCalled = false;
+    let submittedPublishId = '';
     try {
-      const currentFingerprint = await articlePublicationFingerprint(project);
+      const currentFingerprint = await articlePublicationFingerprint(project, publishSettings);
       if (!draftMatches || receipt.articleFingerprint !== currentFingerprint) {
         notify('草稿创建后文章内容已变化，或草稿不属于当前账号。请重新创建草稿并核对。', 'danger');
         return;
@@ -3031,6 +3253,7 @@ function PublishStage({
       await persist({ accountId, mediaId, state: 'submitting', publishId: null, error: null });
       hostCalled = true;
       const result = await api.wechat.publish({ accountId, mediaId });
+      submittedPublishId = result.publishId;
       setPublishId(result.publishId);
       await persist({ accountId, mediaId, publishId: result.publishId, state: 'submitted' });
       notify('发布已提交，正在查询状态。', 'success');
@@ -3044,7 +3267,13 @@ function PublishStage({
         await persist({ accountId, mediaId, state: 'draft', error: null }).catch(() => {});
         notify('发布已取消，草稿仍保留。', 'info');
       } else {
-        await persist({ accountId, mediaId, state: 'unknown', error: message }).catch(() => {});
+        await persist({
+          accountId,
+          mediaId,
+          state: 'unknown',
+          publishId: submittedPublishId || null,
+          error: message,
+        }).catch(() => {});
         notify('发布结果未知：' + message + '。请先查询状态，不要重复提交。', 'danger');
       }
     } finally {
@@ -3054,6 +3283,10 @@ function PublishStage({
 
   async function queryStatus(id = publishId) {
     if (!id && !mediaId) return;
+    if (deliveryMismatch) {
+      notify('当前回执属于图片消息，请在贴图工作流中查询。', 'warning');
+      return;
+    }
     setBusy(true);
     try {
       const value = await api.wechat.publishStatus({ accountId, ...(id ? { publishId: id } : { mediaId }) });
@@ -3077,14 +3310,37 @@ function PublishStage({
 
   async function resetUnknownState() {
     if (!draftBlocked) return;
+    if (deliveryMismatch) {
+      notify('这是图片消息的发送记录，请在贴图工作流中核对和处理。', 'warning');
+      return;
+    }
     if (!window.confirm('请确认已在公众号后台核对草稿或发布状态。重置后再次操作仍可能造成重复，是否继续？')) return;
     try {
+      const previous = receiptRef.current;
+      const history = [
+        ...(Array.isArray(previous.history) ? previous.history : []),
+        {
+          accountId: previous.accountId,
+          mediaId: previous.mediaId,
+          publishId: previous.publishId,
+          state: previous.state,
+          delivery: previous.delivery || 'news',
+          articleFingerprint: previous.articleFingerprint,
+          error: previous.error || null,
+          archivedAt: new Date().toISOString(),
+          archivedReason: 'manual-reset',
+        },
+      ].slice(-10);
       await persist({
         state: 'draft-reset',
         error: null,
+        stale: false,
+        staleReason: null,
+        staleAt: null,
         articleFingerprint: '',
         mediaId: null,
         publishId: null,
+        history,
       });
       setMediaId('');
       setPublishId('');
@@ -3116,7 +3372,7 @@ function PublishStage({
 
   return (
     <div>
-      <StageHeader title="草稿与发布" description="草稿默认调用 draft/add；直接发布由宿主原生确认，结果未知时先查询，不重复提交。" />
+      <StageHeader title="草稿与发布" description="创建草稿后先在公众号后台核对；直接发布由宿主原生确认，结果未知时只查询，不重复提交。" />
       <div className="form-grid">
         <Field label="公众号账号">
           <select value={accountId} onChange={event => setAccountId(event.target.value)}>
@@ -3133,6 +3389,16 @@ function PublishStage({
       {mediaId ? <div className="receipt"><span>草稿 mediaId</span><code>{mediaId}</code></div> : null}
       {publishId ? <div className="receipt"><span>发布标识</span><code>{publishId}</code></div> : null}
       {receipt.error ? <div className="notice warning">{String(receipt.error)}</div> : null}
+      {deliveryMismatch ? (
+        <div className="notice danger">
+          当前公众号草稿属于图片消息，不是图文草稿。请回到贴图工作流核对，文章发布页不会复用这条记录。
+        </div>
+      ) : null}
+      {receipt.stale && !deliveryMismatch ? (
+        <div className="notice warning">
+          生成草稿后文章内容已变化。原草稿与发送记录仍保留，但只能查询；请重新创建草稿并核对后再发布。
+        </div>
+      ) : null}
       {mediaId && !draftMatches && receipt.articleFingerprint ? <div className="notice warning">草稿创建后文章内容或账号已变化，请重新创建草稿。</div> : null}
       {draftBlocked ? (
         <div className="notice warning">
@@ -3140,20 +3406,20 @@ function PublishStage({
             ? '上次发布未成功。请先在公众号后台核对，再重置本地状态并重新创建草稿。'
             : '上次操作的结果未知。请先在公众号后台核对；确认后才能查询状态或明确重置。'}
           插件不会自动重发。
-          <Button type="button" onClick={() => void resetUnknownState()}>
+          <Button type="button" onClick={() => void resetUnknownState()} disabled={deliveryMismatch}>
             {draftState === 'failed' ? '我已核对，重置失败状态' : '我已核对，重置未知状态'}
           </Button>
         </div>
       ) : null}
       {status ? <div className="receipt"><span>状态</span><strong>{status.status}</strong>{status.articleUrl ? <a href={status.articleUrl} target="_blank" rel="noreferrer">查看文章</a> : null}</div> : null}
       <div className="publish-actions">
-        <Button type="button" variant="primary" onClick={() => void createDraft()} busy={busy} disabled={!gate.ok || !accountId || draftBlocked || !draftEnabled || !fingerprintReady || Boolean(mediaId && draftMatches)}>
+        <Button type="button" variant="primary" onClick={() => void createDraft()} busy={busy} disabled={!gate.ok || !accountId || draftBlocked || deliveryMismatch || !draftEnabled || !fingerprintReady || Boolean(mediaId && draftMatches)}>
           {mediaId && draftMatches ? '当前内容已有草稿' : '创建公众号草稿'}
         </Button>
-        <Button type="button" onClick={() => void publish()} busy={busy} disabled={!mediaId || Boolean(publishId) || draftBlocked || !draftMatches || publishMethod !== 'published'}>
+        <Button type="button" onClick={() => void publish()} busy={busy} disabled={!mediaId || Boolean(publishId) || draftBlocked || deliveryMismatch || !draftMatches || publishMethod !== 'published'}>
           提交直接发布
         </Button>
-        <Button type="button" onClick={() => void queryStatus()} busy={busy} disabled={!publishId && !(mediaId && ['submitting', 'unknown', 'submitted'].includes(draftState))}>查询发布状态</Button>
+        <Button type="button" onClick={() => void queryStatus()} busy={busy} disabled={deliveryMismatch || (!publishId && !(mediaId && ['submitting', 'unknown', 'submitted'].includes(draftState)))}>查询发布状态</Button>
       </div>
       {publishMethod !== 'published' ? <div className="notice info">当前发布方式为仅创建草稿。需要直接发布时，请先在配置中心改为“提交直接发布”。</div> : null}
       <div className="archive-box">

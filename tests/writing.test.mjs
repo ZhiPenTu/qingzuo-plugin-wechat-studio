@@ -40,11 +40,36 @@ test('valid short article still passes structural checks', () => {
   assert.ok(result.outline.some(value => value.includes('88%')));
 });
 
-test('missing lead and headings are blocking', () => {
+test('missing lead and headings are writing preferences, not blocks', () => {
   const result = checkDraft('# 只有标题\n\n正文没有导语。', { target_word_count: '10-100' });
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.issues, []);
+  assert.ok(result.warnings.some(message => message.includes('摘要导语')));
+  assert.ok(result.warnings.some(message => message.includes('两个')));
+  assert.ok(result.warnings.some(message => message.includes('低于目标')));
+});
+
+test('missing title stays a hard block', () => {
+  const result = checkDraft('## 只有小节\n\n> 导语。\n\n正文内容。', { target_word_count: '10-100' });
   assert.equal(result.ok, false);
-  assert.ok(result.issues.some(message => message.includes('摘要导语')));
-  assert.ok(result.issues.some(message => message.includes('两个')));
+  assert.ok(result.issues.some(message => message.includes('文章标题')));
+});
+
+test('unclosed code fence is a hard structural block', () => {
+  const result = checkDraft('# 标题\n\n```md\n未闭合', { target_word_count: '10-100' });
+  assert.equal(result.ok, false);
+  assert.ok(result.issues.some(message => message.includes('代码围栏')));
+});
+
+test('bold density and paragraph gaps are writing preferences', () => {
+  const filler = '正文内容。'.repeat(80);
+  const result = checkDraft('# 标题\n\n> 导语。\n\n## 一\n\n' + filler + '\n\n## 二\n\n' + filler, {
+    target_word_count: '10-5000',
+  });
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.issues, []);
+  assert.ok(result.warnings.some(message => message.includes('处加粗')));
+  assert.ok(result.warnings.some(message => message.includes('没有任何加粗落点')));
 });
 
 test('citation stripping preserves whitespace shape', () => {

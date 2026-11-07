@@ -37,7 +37,7 @@ try {
   await host.plugin.getByRole('button', { name: '选择工作文件夹', exact: true }).click();
   await expect(host.plugin.getByRole('heading', { name: '创作工作台', exact: true })).toBeVisible();
   await expect(host.plugin.getByRole('navigation', { name: '主要功能' }).getByRole('button')).toHaveCount(5);
-  await expect(host.plugin.getByRole('radiogroup', { name: '创作入口' }).getByRole('radio')).toHaveCount(6);
+  await expect(host.plugin.getByRole('radiogroup', { name: '创作入口' }).getByRole('radio')).toHaveCount(3);
 
   await host.plugin.getByRole('button', { name: '配置中心', exact: true }).click();
   await expect(host.plugin.getByRole('heading', { name: '配置中心', exact: true })).toBeVisible();

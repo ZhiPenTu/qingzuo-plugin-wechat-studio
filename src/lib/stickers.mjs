@@ -421,6 +421,7 @@ export function stickerPublishBlocked(state) {
 
 export function stickerDraftMatches({
   fingerprintReady = false,
+  stale = false,
   mediaId = '',
   delivery = '',
   accountId = '',
@@ -430,6 +431,7 @@ export function stickerDraftMatches({
 } = {}) {
   return Boolean(
     fingerprintReady
+    && !stale
     && mediaId
     && delivery === 'image'
     && accountId
@@ -446,6 +448,9 @@ export function stickerResetReceipt() {
     publishId: null,
     articleFingerprint: '',
     error: null,
+    stale: false,
+    staleReason: null,
+    staleAt: null,
   };
 }
 

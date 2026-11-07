@@ -8,9 +8,11 @@ import {
   invalidateDerivedProjectFiles,
   listProjects,
   loadProject,
+  markPublicationStale,
   nextStage,
   previousStage,
   saveArticle,
+  saveProjectTopic,
   saveStage,
   slugify,
   stageProgress,
@@ -19,7 +21,7 @@ import {
 function memoryApi() {
   const files = new Map();
   const directories = new Set(['drafts']);
-  const state = { failRemove: '', partialRemove: '' };
+  const state = { failRemove: '', partialRemove: '', failWrite: '' };
   const workspace = {
     async mkdir({ path }) {
       const parts = path.split('/');
@@ -30,6 +32,7 @@ function memoryApi() {
       }
     },
     async writeText({ path, text, overwrite = false }) {
+      if (state.failWrite && path === state.failWrite) throw new Error('模拟写入失败。');
       if (!overwrite && files.has(path)) throw new Error('文件已存在。');
       files.set(path, text);
     },
@@ -111,17 +114,203 @@ test('stage progress marks current and completed', () => {
   assert.equal(progress.find(item => item.id === 'review').completed, false);
 });
 
+test('re-saving an earlier stage clears stale downstream completion', async () => {
+  const { api, files } = memoryApi();
+  files.set('drafts/demo/pipeline.yaml', [
+    'schemaVersion: 1',
+    'stage: final',
+    'status: ready',
+    'completed:',
+    '  - topic',
+    '  - research',
+    '  - writing',
+    '  - review',
+    '  - format',
+    '  - images',
+    '  - final',
+    '',
+  ].join('\n'));
+  await saveStage(api, 'drafts/demo', 'format', '# 新排版\n', { next: true });
+  const project = await loadProject(api, 'drafts/demo');
+  assert.deepEqual(project.pipeline.completed, ['topic', 'research', 'writing', 'review', 'format']);
+  assert.equal(project.pipeline.stage, 'images');
+});
+
 test('draft replacement invalidates every downstream artifact', async () => {
   const { api, files } = memoryApi();
-  for (const file of ['review.md', 'article.md', 'article.html', 'img-plan.json', 'final-review.md', 'publish.json']) {
+  for (const file of ['review.md', 'article.md', 'article.html', 'img-plan.json', 'final-review.md']) {
     files.set('drafts/demo/' + file, 'old');
   }
+  files.set('drafts/demo/publish.json', JSON.stringify({ state: 'drafted', mediaId: 'MEDIA-1' }));
   files.set('drafts/demo/draft.md', '# 新稿\n');
   await invalidateDerivedProjectFiles(api, 'drafts/demo');
   assert.equal(files.has('drafts/demo/draft.md'), true);
-  for (const file of ['review.md', 'article.md', 'article.html', 'img-plan.json', 'final-review.md', 'publish.json']) {
+  for (const file of ['review.md', 'article.md', 'article.html', 'img-plan.json', 'final-review.md']) {
     assert.equal(files.has('drafts/demo/' + file), false);
   }
+  assert.equal(files.has('drafts/demo/publish.json'), true);
+});
+
+test('upstream saves keep the publication receipt and only mark it stale', async () => {
+  const { api, files } = memoryApi();
+  for (const file of ['review.md', 'article.md', 'article.html', 'img-plan.json', 'final-review.md']) {
+    files.set('drafts/demo/' + file, 'old');
+  }
+  files.set('drafts/demo/publish.json', JSON.stringify({
+    state: 'unknown',
+    mediaId: 'MEDIA-1',
+    publishId: 'PUBLISH-1',
+    error: '上次发布超时',
+    delivery: 'draft',
+    accountId: 'acc-1',
+    articleFingerprint: 'FP-1',
+  }));
+  files.set('drafts/demo/.qz-draft-review.json', JSON.stringify({ version: 1, base: '', text: '旧审稿草稿' }));
+  files.set('drafts/demo/.qz-draft-writing.json', JSON.stringify({ version: 1, base: '', text: '保留中的写稿草稿' }));
+  files.set('drafts/demo/pipeline.yaml', 'schemaVersion: 1\nstage: final\ncompleted:\n  - topic\n  - review\n  - final\n');
+  await invalidateDerivedProjectFiles(api, 'drafts/demo');
+  assert.equal(files.has('drafts/demo/publish.json'), true);
+  const project = await loadProject(api, 'drafts/demo');
+  assert.equal(project.pipeline.stage, 'review');
+  const receipt = JSON.parse(files.get('drafts/demo/publish.json'));
+  assert.equal(receipt.stale, true);
+  assert.equal(receipt.staleReason, 'upstream-changed');
+  assert.match(receipt.staleAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+  assert.equal(receipt.state, 'unknown');
+  assert.equal(receipt.mediaId, 'MEDIA-1');
+  assert.equal(receipt.publishId, 'PUBLISH-1');
+  assert.equal(receipt.error, '上次发布超时');
+  assert.equal(receipt.delivery, 'draft');
+  assert.equal(receipt.accountId, 'acc-1');
+  assert.equal(receipt.articleFingerprint, 'FP-1');
+  assert.equal(files.has('drafts/demo/.qz-draft-review.json'), false);
+  assert.equal(files.has('drafts/demo/.qz-draft-writing.json'), true);
+});
+
+test('invalidating downstream artifacts prunes the completed stages', async () => {
+  const { api, files } = memoryApi();
+  files.set('drafts/demo/pipeline.yaml', [
+    'schemaVersion: 1',
+    'stage: review',
+    'status: active',
+    'completed:',
+    '  - topic',
+    '  - research',
+    '  - writing',
+    '  - review',
+    '  - format',
+    '  - images',
+    '  - final',
+    '',
+  ].join('\n'));
+  files.set('drafts/demo/article.html', '<p>旧排版</p>');
+  await invalidateDerivedProjectFiles(api, 'drafts/demo');
+  const project = await loadProject(api, 'drafts/demo');
+  assert.deepEqual(project.pipeline.completed, ['topic', 'research', 'writing']);
+});
+
+test('keeping the review file preserves the review stage', async () => {
+  const { api, files } = memoryApi();
+  files.set('drafts/demo/pipeline.yaml', [
+    'schemaVersion: 1',
+    'stage: review',
+    'status: active',
+    'completed:',
+    '  - topic',
+    '  - research',
+    '  - writing',
+    '  - review',
+    '  - format',
+    '  - final',
+    '',
+  ].join('\n'));
+  files.set('drafts/demo/review.md', '# 审稿\n');
+  files.set('drafts/demo/article.html', '<p>旧排版</p>');
+  await invalidateDerivedProjectFiles(api, 'drafts/demo', { includeReview: false });
+  assert.equal(files.has('drafts/demo/review.md'), true);
+  assert.equal(files.has('drafts/demo/article.html'), false);
+  const project = await loadProject(api, 'drafts/demo');
+  assert.deepEqual(project.pipeline.completed, ['topic', 'research', 'writing', 'review']);
+});
+
+test('a failed invalidation restores the deleted files and the pipeline', async () => {
+  const { api, files, state } = memoryApi();
+  const pipelineText = [
+    'schemaVersion: 1',
+    'stage: review',
+    'status: active',
+    'completed:',
+    '  - topic',
+    '  - writing',
+    '  - review',
+    '',
+  ].join('\n');
+  files.set('drafts/demo/pipeline.yaml', pipelineText);
+  files.set('drafts/demo/review.md', '旧审稿');
+  files.set('drafts/demo/article.md', '旧排版');
+  files.set('drafts/demo/article.html', '<p>旧排版</p>');
+  files.set('drafts/demo/publish.json', JSON.stringify({ state: 'drafted', mediaId: 'MEDIA-2' }));
+  state.failRemove = 'drafts/demo/article.html';
+  await assert.rejects(() => invalidateDerivedProjectFiles(api, 'drafts/demo'), /模拟删除失败/);
+  assert.equal(files.get('drafts/demo/review.md'), '旧审稿');
+  assert.equal(files.get('drafts/demo/article.md'), '旧排版');
+  assert.equal(files.has('drafts/demo/article.html'), true);
+  assert.equal(files.get('drafts/demo/pipeline.yaml'), pipelineText);
+  assert.equal(JSON.parse(files.get('drafts/demo/publish.json')).stale, undefined);
+});
+
+test('a failed receipt update rolls back the pruned pipeline', async () => {
+  const { api, files, state } = memoryApi();
+  const pipelineText = [
+    'schemaVersion: 1',
+    'stage: review',
+    'status: active',
+    'completed:',
+    '  - topic',
+    '  - writing',
+    '  - review',
+    '',
+  ].join('\n');
+  files.set('drafts/demo/pipeline.yaml', pipelineText);
+  files.set('drafts/demo/article.html', '<p>旧排版</p>');
+  files.set('drafts/demo/publish.json', JSON.stringify({ state: 'drafted', mediaId: 'MEDIA-3' }));
+  state.failWrite = 'drafts/demo/publish.json';
+  await assert.rejects(() => invalidateDerivedProjectFiles(api, 'drafts/demo'), /模拟写入失败/);
+  assert.equal(files.has('drafts/demo/article.html'), true);
+  assert.equal(files.get('drafts/demo/pipeline.yaml'), pipelineText);
+  assert.equal(JSON.parse(files.get('drafts/demo/publish.json')).stale, undefined);
+});
+
+test('marking a publication receipt stale keeps the receipt fields', async () => {
+  const { api, files } = memoryApi();
+  files.set('drafts/demo/publish.json', JSON.stringify({
+    state: 'drafted',
+    mediaId: 'MEDIA-9',
+    publishId: 'PUBLISH-9',
+    accountId: 'acc-9',
+    delivery: 'draft',
+    articleFingerprint: 'FP-9',
+  }));
+  const result = await markPublicationStale(api, 'drafts/demo');
+  assert.equal(result.stale, true);
+  assert.equal(files.has('drafts/demo/publish.json'), true);
+  const receipt = JSON.parse(files.get('drafts/demo/publish.json'));
+  assert.equal(receipt.stale, true);
+  assert.equal(receipt.staleReason, 'upstream-changed');
+  assert.equal(receipt.mediaId, 'MEDIA-9');
+  assert.equal(receipt.publishId, 'PUBLISH-9');
+  assert.equal(receipt.accountId, 'acc-9');
+  assert.equal(receipt.delivery, 'draft');
+  assert.equal(receipt.articleFingerprint, 'FP-9');
+  assert.equal(receipt.state, 'drafted');
+});
+
+test('marking a missing publication receipt never creates a file', async () => {
+  const { api, files } = memoryApi();
+  const result = await markPublicationStale(api, 'drafts/demo');
+  assert.equal(result.stale, false);
+  assert.equal(result.receipt, null);
+  assert.equal(files.has('drafts/demo/publish.json'), false);
 });
 
 test('project creation avoids overwrite and starts rewrite work at writing', async () => {
@@ -163,6 +352,37 @@ test('saved layout settings survive a project reload', async () => {
   assert.equal(reloaded.article.format_font_size, '16px');
 });
 
+test('project creation persists the topic and direction for later reloads', async () => {
+  const { api } = memoryApi();
+  const created = await createProject(api, {
+    title: 'Topic',
+    mode: 'full',
+    source: '旧来源',
+    topic: 'AI 编程助手',
+    direction: '面向企业团队',
+  }, new Date(2026, 10, 3));
+  assert.equal(created.pipeline.topic, 'AI 编程助手');
+  assert.equal(created.pipeline.direction, '面向企业团队');
+  assert.equal(created.pipeline.source, '旧来源');
+  const reloaded = await loadProject(api, created.directory);
+  assert.equal(reloaded.pipeline.topic, 'AI 编程助手');
+  assert.equal(reloaded.pipeline.direction, '面向企业团队');
+  assert.equal(reloaded.pipeline.source, '旧来源');
+});
+
+test('project creation without a topic falls back to the source field', async () => {
+  const { api } = memoryApi();
+  const created = await createProject(api, {
+    title: 'Sticker',
+    mode: 'paste',
+    source: '贴图工作流',
+  }, new Date(2026, 10, 3));
+  assert.equal(created.pipeline.topic, '贴图工作流');
+  const reloaded = await loadProject(api, created.directory);
+  assert.equal(reloaded.pipeline.topic, '贴图工作流');
+  assert.equal(reloaded.pipeline.source, '贴图工作流');
+});
+
 test('custom drafts root stays inside the drafts workspace root', async () => {
   const { api, directories } = memoryApi();
   directories.add('drafts/team/20261103-demo');
@@ -175,6 +395,19 @@ test('custom drafts root stays inside the drafts workspace root', async () => {
   assert.equal(created.directory, 'drafts/team/20261103-demo-1');
   const projects = await listProjects(api, 'drafts/team');
   assert.ok(projects.some(item => item.directory === 'drafts/team/20261103-demo-1'));
+});
+
+test('selected topic survives a project reload', async () => {
+  const { api } = memoryApi();
+  const created = await createProject(api, {
+    title: 'Topic',
+    mode: 'full',
+    topic: '初始方向',
+    initialStage: 'topic',
+  }, new Date(2026, 10, 3));
+  await saveProjectTopic(api, created.directory, '用户在调研阶段确认的选题');
+  const reloaded = await loadProject(api, created.directory);
+  assert.equal(reloaded.pipeline.topic, '用户在调研阶段确认的选题');
 });
 
 test('custom image copies persist across reloads and clean up on reset', async () => {

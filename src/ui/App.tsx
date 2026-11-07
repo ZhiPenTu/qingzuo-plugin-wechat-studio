@@ -49,7 +49,9 @@ export function App() {
   const [loading, setLoading] = useState(true);
   const [dataError, setDataError] = useState('');
   const [toasts, setToasts] = useState<Toast[]>([]);
+  const [workspaceEpoch, setWorkspaceEpoch] = useState(0);
   const toastId = useRef(0);
+  const workspaceEpochRef = useRef(0);
 
   const notify = useCallback((text: string, tone: Toast['tone'] = 'info') => {
     const id = ++toastId.current;
@@ -57,24 +59,35 @@ export function App() {
     setTimeout(() => setToasts(current => current.filter(item => item.id !== id)), tone === 'danger' ? 7000 : 4200);
   }, []);
 
-  const refreshConfig = useCallback(async () => {
+  const refreshConfig = useCallback(async (epoch = workspaceEpochRef.current) => {
     const configText = await readOptional('.aws-article/config.yaml');
     const nextWritingSpec = await readOptional('.aws-article/writing-spec.md');
+    if (epoch !== workspaceEpochRef.current) return null;
     if (!configText.trim()) {
       setConfig({});
       setWritingSpec(nextWritingSpec);
-      return;
+      return {};
     }
-    setConfig(parseYamlObject(configText, 'config.yaml'));
+    const next = parseYamlObject(configText, 'config.yaml');
+    setConfig(next);
     setWritingSpec(nextWritingSpec);
+    return next;
   }, [notify]);
 
-  const refreshProjects = useCallback(async () => {
-    const values = await listProjects(api, config.drafts_root || 'drafts');
-    setProjects(values);
+  const refreshProjects = useCallback(async (epoch = workspaceEpochRef.current, draftsRoot = config.drafts_root || 'drafts') => {
+    const values = await listProjects(api, draftsRoot);
+    if (epoch === workspaceEpochRef.current) setProjects(values);
   }, [config.drafts_root]);
 
-  const refreshPresets = useCallback(async () => {
+  const refreshProjectList = useCallback(async () => {
+    try {
+      await refreshProjects();
+    } catch (error) {
+      notify(errorText(error), 'danger');
+    }
+  }, [notify, refreshProjects]);
+
+  const refreshPresets = useCallback(async (epoch = workspaceEpochRef.current) => {
     const readDirectory = async (path: string) => {
       const entries = await api.workspace.list({ path, recursive: true }).catch((error: unknown) => {
         if (isMissingError(error)) return [];
@@ -91,6 +104,7 @@ export function App() {
       readDirectory('.aws-article/presets/formatting'),
       readDirectory('.aws-article/presets/components'),
     ]);
+    if (epoch !== workspaceEpochRef.current) return;
     await callWorker('loadPresets', { themes, components });
     const catalog = await callWorker<any>('presets', {});
     const values = Object.values(catalog.themes || {}).map((theme: any) => ({
@@ -106,10 +120,10 @@ export function App() {
       })),
       sortOrder: Number(theme.sort_order || 99),
     })).sort((left, right) => left.sortOrder - right.sortOrder);
-    if (values.length) setThemeSummaries(values);
+    if (values.length && epoch === workspaceEpochRef.current) setThemeSummaries(values);
   }, []);
 
-  const refreshCapabilities = useCallback(async () => {
+  const refreshCapabilities = useCallback(async (epoch = workspaceEpochRef.current) => {
     const [serverValue, accountValue, textValue, officialImageValue, proxyImageValue] = await Promise.all([
       api.mcp.servers().catch(() => []),
       api.wechat.accounts().catch(() => []),
@@ -124,27 +138,38 @@ export function App() {
       Array.isArray(officialImageValue) ? officialImageValue : [],
       Array.isArray(proxyImageValue) ? proxyImageValue : [],
     );
+    const nextPreferences = await loadPreferences(nextTextModels, nextImageModels, nextAccounts);
+    if (epoch !== workspaceEpochRef.current) return;
     setServers(nextServers);
     setAccounts(nextAccounts);
     setTextModels(nextTextModels);
     setImageModels(nextImageModels);
-    setPreferences(await loadPreferences(nextTextModels, nextImageModels, nextAccounts));
+    setPreferences(nextPreferences);
   }, []);
 
   const initialize = useCallback(async () => {
+    const epoch = workspaceEpochRef.current;
     setLoading(true);
     setDataError('');
     try {
       const status = await api.workspace.status();
+      if (epoch !== workspaceEpochRef.current) return;
       setWorkspace(status);
       if (status.available) {
-        await Promise.all([refreshConfig(), refreshProjects(), refreshCapabilities(), refreshPresets()]);
+        const nextConfig = await refreshConfig(epoch);
+        if (epoch !== workspaceEpochRef.current || !nextConfig) return;
+        await Promise.all([
+          refreshProjects(epoch, nextConfig.drafts_root || 'drafts'),
+          refreshCapabilities(epoch),
+          refreshPresets(epoch),
+        ]);
       }
     } catch (error) {
+      if (epoch !== workspaceEpochRef.current) return;
       setDataError(errorText(error));
       notify(errorText(error), 'danger');
     } finally {
-      setLoading(false);
+      if (epoch === workspaceEpochRef.current) setLoading(false);
     }
   }, [notify, refreshCapabilities, refreshConfig, refreshPresets, refreshProjects]);
 
@@ -157,11 +182,29 @@ export function App() {
     };
   }, [initialize]);
 
+  function clearWorkspaceSession() {
+    setProject(null);
+    setPage('workbench');
+  }
+
+  function startWorkspaceEpoch() {
+    workspaceEpochRef.current += 1;
+    setWorkspaceEpoch(workspaceEpochRef.current);
+  }
+
   async function pickWorkspace() {
+    if (workspace?.available) {
+      const confirmed = window.confirm('切换工作文件夹会关闭当前项目，并清空未完成的写稿与贴图状态。确认切换？');
+      if (!confirmed) return;
+    }
     try {
       const value = await api.workspace.pick();
       if (!value) return;
+      // 切换前先关闭旧项目，切换后再次确认页面不再指向旧工作区。
+      clearWorkspaceSession();
+      startWorkspaceEpoch();
       await initialize();
+      clearWorkspaceSession();
       notify('已连接工作文件夹「' + value.name + '」。', 'success');
     } catch (error) {
       notify(errorText(error), 'danger');
@@ -175,8 +218,11 @@ export function App() {
       return;
     }
     if (directory) {
+      const epoch = workspaceEpochRef.current;
       try {
-        setProject(await loadProject(api, directory) as unknown as ArticleProject);
+        const loaded = await loadProject(api, directory) as unknown as ArticleProject;
+        if (epoch !== workspaceEpochRef.current) return;
+        setProject(loaded);
         setPage('projects');
       } catch (error) {
         notify(errorText(error), 'danger');
@@ -186,13 +232,43 @@ export function App() {
 
   const reloadProject = useCallback(async () => {
     if (!project) return;
+    const epoch = workspaceEpochRef.current;
     try {
-      setProject(await loadProject(api, project.directory) as unknown as ArticleProject);
+      const loaded = await loadProject(api, project.directory) as unknown as ArticleProject;
+      if (epoch !== workspaceEpochRef.current) return;
+      setProject(loaded);
       await refreshProjects();
     } catch (error) {
       notify(errorText(error), 'danger');
     }
   }, [notify, project, refreshProjects]);
+
+  // 项目页 props 统一收集：列表刷新只走 onRefresh，不会顺带重新加载当前项目。
+  const projectsPageProps = {
+    project,
+    projects,
+    config,
+    servers,
+    accounts,
+    textModels,
+    imageModels,
+    preferences,
+    themeSummaries,
+    notify,
+    onOpen: (directory: string) => void openProject(null, directory),
+    onClose: () => setProject(null),
+    onReload: reloadProject,
+    onRefresh: refreshProjectList,
+    onChanged: async () => {
+      try {
+        await Promise.all([refreshProjects(), refreshConfig(), refreshPresets()]);
+      } catch (error) {
+        setDataError(errorText(error));
+        notify(errorText(error), 'danger');
+      }
+    },
+    onGoConfig: () => setPage('config'),
+  };
 
   return (
     <div className="app-shell">
@@ -255,7 +331,11 @@ export function App() {
             config={config}
             projects={projects}
             servers={servers}
-            onOpenProject={next => void openProject(next)}
+            workspaceEpoch={workspaceEpoch}
+            onOpenProject={(next, epoch) => {
+              if (epoch !== undefined && epoch !== workspaceEpochRef.current) return;
+              void openProject(next);
+            }}
             onChanged={async () => {
               try {
                 await Promise.all([refreshProjects(), refreshConfig(), refreshPresets()]);
@@ -269,30 +349,7 @@ export function App() {
             notify={notify}
           />
         ) : page === 'projects' ? (
-          <ProjectsPage
-            project={project}
-            projects={projects}
-            config={config}
-            servers={servers}
-            accounts={accounts}
-            textModels={textModels}
-            imageModels={imageModels}
-            preferences={preferences}
-            themeSummaries={themeSummaries}
-            notify={notify}
-            onOpen={directory => void openProject(null, directory)}
-            onClose={() => setProject(null)}
-            onReload={reloadProject}
-            onChanged={async () => {
-              try {
-                await Promise.all([refreshProjects(), refreshConfig(), refreshPresets()]);
-              } catch (error) {
-                setDataError(errorText(error));
-                notify(errorText(error), 'danger');
-              }
-            }}
-            onGoConfig={() => setPage('config')}
-          />
+          <ProjectsPage {...projectsPageProps} />
         ) : page === 'config' ? (
           <ConfigPage
             config={config}
@@ -323,6 +380,7 @@ export function App() {
           />
         ) : (
           <StickerPage
+            key={workspaceEpoch}
             config={config}
             servers={servers}
             imageModels={imageModels}

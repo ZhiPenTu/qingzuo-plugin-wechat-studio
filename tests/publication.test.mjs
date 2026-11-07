@@ -1,6 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildPublicationGate, hasSavedCover, reviewIssueStage } from '../src/lib/publication.mjs';
+import {
+  articlePublicationFingerprint,
+  articleDraftMatches,
+  buildPublicationGate,
+  hasSavedCover,
+  publicationReceiptConflictsWithNews,
+  publicationReceiptDelivery,
+  reviewIssueStage,
+} from '../src/lib/publication.mjs';
 
 const bodyImage = 'imgs/body-01.jpg';
 
@@ -63,4 +71,46 @@ test('review issue stages point at an editable surface', () => {
   assert.equal(reviewIssueStage('配图'), 'images');
   assert.equal(reviewIssueStage('HTML'), 'format');
   assert.equal(reviewIssueStage('原创标注'), 'config');
+});
+
+test('publication receipts keep image and news drafts separate', () => {
+  assert.equal(publicationReceiptDelivery({ delivery: 'image' }), 'image');
+  assert.equal(publicationReceiptDelivery({ source: 'sticker' }), 'image');
+  assert.equal(publicationReceiptDelivery({ delivery: 'news' }), 'news');
+  assert.equal(publicationReceiptDelivery({}), 'news');
+  const common = {
+    fingerprintReady: true,
+    mediaId: 'media-1',
+    accountId: 'account-1',
+    receiptMediaId: 'media-1',
+    receiptAccountId: 'account-1',
+    receiptFingerprint: 'fingerprint-1',
+    fingerprint: 'fingerprint-1',
+  };
+  assert.equal(articleDraftMatches({ ...common, delivery: 'news' }), true);
+  assert.equal(articleDraftMatches({ ...common, delivery: 'image' }), false);
+  assert.equal(articleDraftMatches({ ...common, delivery: 'news', stale: true }), false);
+  assert.equal(publicationReceiptConflictsWithNews({}), false);
+  assert.equal(publicationReceiptConflictsWithNews({ state: 'draft' }), false);
+  assert.equal(publicationReceiptConflictsWithNews({ delivery: 'image', state: 'unknown' }), true);
+  assert.equal(publicationReceiptConflictsWithNews({ source: 'sticker', state: 'unknown' }), true);
+});
+
+test('article fingerprint covers publish settings used by draft creation', async () => {
+  const project = fixture();
+  const first = await articlePublicationFingerprint(project, {
+    needOpenComment: 1,
+    onlyFansCanComment: 0,
+  });
+  const changedComments = await articlePublicationFingerprint(project, {
+    needOpenComment: 0,
+    onlyFansCanComment: 0,
+  });
+  const ignoredMethod = await articlePublicationFingerprint(project, {
+    needOpenComment: 1,
+    onlyFansCanComment: 0,
+    publishMethod: 'published',
+  });
+  assert.notEqual(first, changedComments);
+  assert.equal(first, ignoredMethod);
 });

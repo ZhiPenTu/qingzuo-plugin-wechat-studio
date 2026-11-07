@@ -623,6 +623,33 @@ export function mapGeneratedFiles(plan, entries) {
   return plan.prompts.map((_prompt, index) => generated.find(entry => entry.batchIndex === index + 1) || null).filter(Boolean);
 }
 
+export function imagePlanSignature(plan) {
+  if (!plan || typeof plan !== 'object') return '';
+  return JSON.stringify({
+    title: plan.title || '',
+    brief: plan.brief || '',
+    medium: plan.medium || '',
+    cover: plan.cover ? {
+      index: plan.cover.index,
+      style: plan.cover.style,
+      aspect: plan.cover.aspect,
+      copy: plan.cover.copy || '',
+      prompt: plan.cover.prompt || '',
+      generate: Boolean(plan.cover.generate),
+    } : null,
+    items: (plan.items || []).map(item => ({
+      index: item.index,
+      style: item.style,
+      aspect: item.aspect,
+      src: item.src,
+      content: item.content || item.originalAlt || '',
+      prompt: item.prompt || '',
+      generate: Boolean(item.generate),
+    })),
+    prompts: plan.prompts || [],
+  });
+}
+
 export function targetImageSize(aspect) {
   return ASPECT_SIZES[aspect] || ASPECT_SIZES['3:4'];
 }
